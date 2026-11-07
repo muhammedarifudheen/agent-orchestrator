@@ -32,7 +32,17 @@ def travel_valid_calls(state: dict) -> Iterator[tuple[str, dict]]:
                                 "details": "AI-865 DEL->BOM"}
 
 
+def weather_valid_calls(state: dict) -> Iterator[tuple[str, dict]]:
+    """Calls the LIVE Open-Meteo API (no key needed)."""
+    yield "get_current_weather", {"latitude": 28.61, "longitude": 77.21}
+    yield "get_daily_forecast", {"latitude": 28.61, "longitude": 77.21, "days": 2}
+
+
 CASES = {
+    "weather": {
+        "valid": weather_valid_calls,
+        "invalid": ("get_current_weather", {"latitude": 999, "longitude": 77.21}, "INVALID_ARGUMENT", False),
+    },
     "travel": {
         "valid": travel_valid_calls,
         "invalid": ("search_flights", {"origin": "DEL", "destination": "BOM", "date": "not-a-date"},

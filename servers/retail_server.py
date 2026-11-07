@@ -9,14 +9,14 @@ Customer C-TIMEOUT also triggers that timeout; customer C-DECLINED triggers PAYM
 """
 from __future__ import annotations
 
-import os
 import uuid
 
 from mcp.server.mcpserver import MCPServer
 
-from errors import ToolFailure, guarded
+from _base import ToolFailure, make_tool, outage_active
 
 mcp = MCPServer("retail")
+tool = make_tool(mcp)
 
 _TOLERANCE = 0.005
 
@@ -76,8 +76,7 @@ def _get_order(order_id: str) -> dict:
     return order
 
 
-@mcp.tool()
-@guarded
+@tool(side_effect="read")
 def check_inventory(sku: str, qty: int) -> dict:
     """Check whether a SKU has enough stock for a quantity, and get its price. Read-only.
 
@@ -105,8 +104,7 @@ def check_inventory(sku: str, qty: int) -> dict:
     }
 
 
-@mcp.tool()
-@guarded
+@tool(side_effect="write", idempotent=False)
 def create_order(sku: str, qty: int, customer_id: str) -> dict:
     """Create an order and reserve (decrement) stock. Status starts as PENDING_PAYMENT.
 
@@ -148,8 +146,7 @@ def create_order(sku: str, qty: int, customer_id: str) -> dict:
     return dict(_ORDERS[order_id])
 
 
-@mcp.tool()
-@guarded
+@tool(side_effect="money", idempotent=False)
 def charge_payment(order_id: str, amount: float) -> dict:
     """Charge the customer for an order. Moves real money.
 
@@ -179,7 +176,8 @@ def charge_payment(order_id: str, amount: float) -> dict:
                           f"Amount {amount} does not equal order total {order['total_amount']}.", retryable=False)
 
     # TODO(real-api): call the payment gateway (Stripe, Adyen, ...) to authorize and capture.
-    if os.environ.get("RETAIL_FAIL_MODE") == "payment_down" or order["customer_id"] == "C-TIMEOUT":
+    gateway_down = outage_active("RETAIL_FAIL_MODE", "charge_payment", {"payment_down": {"charge_payment"}})
+    if gateway_down or order["customer_id"] == "C-TIMEOUT":
         raise ToolFailure("PAYMENT_GATEWAY_TIMEOUT", "Payment gateway timed out; the charge was not made.",
                           retryable=True)
     if order["customer_id"] == "C-DECLINED":
@@ -192,8 +190,7 @@ def charge_payment(order_id: str, amount: float) -> dict:
     return dict(_PAYMENTS[payment_id])
 
 
-@mcp.tool()
-@guarded
+@tool(side_effect="write", idempotent=False)
 def create_shipment(order_id: str, address: str) -> dict:
     """Create a shipment for a PAID order. Side effect: books a carrier pickup.
 

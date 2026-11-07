@@ -1,0 +1,100 @@
+# Genericity proof: a trivial public API, no auth. NOT another industry server.
+# Open-Meteo forecast API: https://open-meteo.com/en/docs
+system_name: weather
+description: Weather forecasts by coordinates (Open-Meteo public API, free, no API key).
+base_url: https://api.open-meteo.com
+base_url_env: WEATHER_BASE_URL
+timeout_s: 10
+auth: {kind: none}
+error_map:
+  - {when: {status: 429}, code: RATE_LIMITED, retryable: true, meaning: "Free-tier rate limit reached; retry later"}
+  - {when: {status: 5xx}, code: SERVICE_UNAVAILABLE, retryable: true, meaning: "Weather service is unavailable"}
+
+operations:
+  - name: get_current_weather
+    summary: Get the current weather conditions at a latitude/longitude.
+    when_to_call: Call when you need the temperature, wind or weather code right now at a known location.
+    side_effect: read
+    idempotent: true
+    request:
+      method: GET
+      path: /v1/forecast
+      query_const: {current_weather: "true"}
+    params:
+      - {name: latitude, type: number, in: query, required: true,
+         description: "Latitude in decimal degrees, -90 to 90 (e.g. 28.61 for Delhi).",
+         constraints: {minimum: -90, maximum: 90}}
+      - {name: longitude, type: number, in: query, required: true,
+         description: "Longitude in decimal degrees, -180 to 180 (e.g. 77.21 for Delhi).",
+         constraints: {minimum: -180, maximum: 180}}
+    response:
+      type: object
+      select: current_weather
+      description: "time (ISO8601, GMT), temperature (deg C), windspeed (km/h), winddirection (deg), is_day (0/1), weathercode (WMO code), interval (s)."
+    errors:
+      - {when: {status: 400}, code: INVALID_COORDINATES, retryable: false, meaning: "Coordinates were rejected by the weather service"}
+    examples:
+      - name: delhi
+        args: {latitude: 28.61, longitude: 77.21}
+        mock:
+          status: 200
+          body: {latitude: 28.57, longitude: 77.19, current_weather: {time: "2026-11-07T14:00", interval: 900, temperature: 23.2, windspeed: 5.2, winddirection: 284, is_day: 0, weathercode: 0}}
+        expect: ok
+        expect_keys: [temperature, windspeed, weathercode]
+      - name: latitude_out_of_range
+        args: {latitude: 999, longitude: 77.21}
+        expect: {code: INVALID_ARGUMENT, retryable: false}
+      - name: server_rejects_coordinates
+        args: {latitude: 10, longitude: 10}
+        mock: {status: 400, body: {error: true, reason: "Latitude must be in range of -90 to 90. Given: 999.0."}}
+        expect: {code: INVALID_COORDINATES, retryable: false}
+      - name: rate_limited
+        args: {latitude: 10, longitude: 10}
+        mock: {status: 429, body: {error: true, reason: "Too many requests"}}
+        expect: {code: RATE_LIMITED, retryable: true}
+      - name: read_timeout_is_retryable_for_reads
+        args: {latitude: 10, longitude: 10}
+        mock: {raises: ReadTimeout}
+        expect: {code: TIMEOUT, retryable: true}
+
+  - name: get_daily_forecast
+    summary: Get the daily min/max temperature and precipitation forecast for the next days.
+    when_to_call: Call when you need a multi-day outlook at a known location; use get_current_weather for right now.
+    side_effect: read
+    idempotent: true
+    request:
+      method: GET
+      path: /v1/forecast
+      query_const: {daily: "temperature_2m_max,temperature_2m_min,precipitation_sum", timezone: auto}
+    params:
+      - {name: latitude, type: number, in: query, required: true,
+         description: "Latitude in decimal degrees, -90 to 90.", constraints: {minimum: -90, maximum: 90}}
+      - {name: longitude, type: number, in: query, required: true,
+         description: "Longitude in decimal degrees, -180 to 180.", constraints: {minimum: -180, maximum: 180}}
+      - {name: days, wire_name: forecast_days, type: integer, in: query, required: false, default: 3,
+         description: "Number of forecast days, 1 to 16.", constraints: {minimum: 1, maximum: 16}}
+    response:
+      type: object
+      select: daily
+      description: "Parallel arrays: time (dates), temperature_2m_max and temperature_2m_min (deg C), precipitation_sum (mm)."
+    errors:
+      - {when: {status: 400}, code: INVALID_REQUEST, retryable: false, meaning: "The weather service rejected the request"}
+    examples:
+      - name: two_days_delhi
+        args: {latitude: 28.61, longitude: 77.21, days: 2}
+        mock:
+          status: 200
+          body: {daily: {time: ["2026-11-07", "2026-11-08"], temperature_2m_max: [28.6, 28.2], temperature_2m_min: [18.5, 19.1], precipitation_sum: [0.0, 0.0]}}
+        expect: ok
+        expect_keys: [time, temperature_2m_max, temperature_2m_min]
+      - name: too_many_days
+        args: {latitude: 28.61, longitude: 77.21, days: 99}
+        expect: {code: INVALID_ARGUMENT, retryable: false}
+      - name: service_down
+        args: {latitude: 28.61, longitude: 77.21}
+        mock: {status: 503, body: {error: true, reason: "maintenance"}}
+        expect: {code: SERVICE_UNAVAILABLE, retryable: true}
+      - name: malformed_success_body
+        args: {latitude: 28.61, longitude: 77.21}
+        mock: {status: 200, body: {unexpected: true}}
+        expect: {code: UNEXPECTED_RESPONSE, retryable: false}

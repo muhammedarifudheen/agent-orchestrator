@@ -24,6 +24,20 @@ SEP = "__"
 _CODE = re.compile(
     r"^\s*(?:Error executing tool \S+:\s*)?\[([A-Z][A-Z0-9_]*)\]\s+retryable=(true|false)\s*(.*)", re.S
 )
+# The SDK itself rejects bad/missing arguments before the tool runs, with pydantic text that does
+# not follow the server contract. Normalize it here so the agent always sees [CODE] retryable=...
+_ARG_VALIDATION = re.compile(r"\d+ validation errors? for \w+Arguments")
+
+
+def parse_error(text: str) -> tuple[str, bool | None, str]:
+    """Parse an is_error text into (code, retryable, message). retryable None = unknown format."""
+    m = _CODE.match(text)
+    if m:
+        return m.group(1), m.group(2) == "true", m.group(3)
+    if _ARG_VALIDATION.search(text):
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip() and "errors.pydantic.dev" not in ln]
+        return "INVALID_ARGUMENTS", False, "; ".join(lines[:6])[:400]
+    return "TOOL_ERROR", None, text or "unknown error"
 
 
 @dataclass
@@ -107,10 +121,8 @@ class ToolRegistry:
 
         text = "\n".join(getattr(c, "text", "") for c in result.content).strip()
         if result.is_error:
-            m = _CODE.match(text)
-            if m:
-                return fail(m.group(1), m.group(3), retryable=m.group(2) == "true")
-            return fail("TOOL_ERROR", text or "unknown error")  # contract violation: retryable unknown
+            code, retryable, message = parse_error(text)
+            return fail(code, message, retryable=retryable)
         data: Any = result.structured_content
         if isinstance(data, dict) and set(data) == {"result"}:  # SDK wraps non-dict returns
             data = data["result"]

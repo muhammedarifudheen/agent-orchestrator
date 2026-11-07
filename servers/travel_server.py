@@ -9,16 +9,16 @@ Set TRAVEL_FAIL_MODE to simulate outages (for testing the exception routing laye
 """
 from __future__ import annotations
 
-import os
 import re
 import uuid
 from datetime import date as _date
 
 from mcp.server.mcpserver import MCPServer
 
-from errors import ToolFailure, guarded
+from _base import ToolFailure, check_outage, make_tool
 
 mcp = MCPServer("travel")
+tool = make_tool(mcp)
 
 # TODO(real-api): replace with the airline/GDS inventory (Amadeus, Sabre, NDC, ...).
 _MOCK_ROUTES: dict[tuple[str, str], list[dict]] = {
@@ -43,16 +43,12 @@ _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _check_outage(tool: str) -> None:
-    mode = os.environ.get("TRAVEL_FAIL_MODE", "")
-    if mode == "all_down" or (mode == "search_down" and tool == "search_flights") or (
-        mode == "booking_down" and tool == "book_flight"
-    ):
-        raise ToolFailure("SERVICE_UNAVAILABLE", f"Upstream travel provider is down (simulated: {mode}).",
-                          retryable=True)
+    check_outage("TRAVEL_FAIL_MODE", tool,
+                 {"search_down": {"search_flights"}, "booking_down": {"book_flight"}},
+                 code="SERVICE_UNAVAILABLE", message="Upstream travel provider is down")
 
 
-@mcp.tool()
-@guarded
+@tool(side_effect="read")
 def search_flights(origin: str, destination: str, date: str) -> list[dict]:
     """Search available flights between two airports on a date. Read-only and idempotent.
 
@@ -92,8 +88,7 @@ def search_flights(origin: str, destination: str, date: str) -> list[dict]:
     ]
 
 
-@mcp.tool()
-@guarded
+@tool(side_effect="write", idempotent=False)
 def book_flight(flight_id: str, passenger_name: str, passenger_email: str) -> dict:
     """Book one seat on a flight returned by search_flights. Creates a real reservation.
 
@@ -151,8 +146,7 @@ def book_flight(flight_id: str, passenger_name: str, passenger_email: str) -> di
     return _BOOKINGS[ref]
 
 
-@mcp.tool()
-@guarded
+@tool(side_effect="write", idempotent=False)
 def send_confirmation(email: str, booking_ref: str, details: str) -> bool:
     """Email a booking confirmation to the passenger. Not idempotent: each call sends one email.
 

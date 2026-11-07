@@ -1,0 +1,150 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "System spec: describes one external system as MCP tools",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["system_name", "base_url", "operations"],
+  "properties": {
+    "system_name": {"type": "string", "pattern": "^[a-z][a-z0-9]*$", "description": "Lowercase id; becomes servers/<name>_server.py and the <name>__ tool prefix."},
+    "description": {"type": "string"},
+    "base_url": {"type": "string", "pattern": "^https?://"},
+    "base_url_env": {"type": "string", "description": "Env var that overrides base_url (e.g. to point at a sandbox)."},
+    "timeout_s": {"type": "number", "exclusiveMinimum": 0},
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {"enum": ["none", "api_key", "bearer", "basic"]},
+        "env": {"type": "string", "description": "Env var holding the secret (api_key, bearer)."},
+        "header": {"type": "string"},
+        "query": {"type": "string"},
+        "user_env": {"type": "string"},
+        "password_env": {"type": "string"}
+      }
+    },
+    "error_map": {"type": "array", "items": {"$ref": "#/definitions/error_rule"}},
+    "operations": {"type": "array", "minItems": 1, "items": {"$ref": "#/definitions/operation"}}
+  },
+  "definitions": {
+    "status": {"anyOf": [{"type": "integer", "minimum": 100, "maximum": 599}, {"type": "string", "pattern": "^[1-5]xx$"}]},
+    "error_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["when", "code", "retryable"],
+      "properties": {
+        "when": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "status": {"$ref": "#/definitions/status"},
+            "body": {"type": "object", "description": "dotted.path -> expected value in the JSON error body"}
+          }
+        },
+        "code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"},
+        "retryable": {"type": "boolean"},
+        "meaning": {"type": "string"}
+      }
+    },
+    "param": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "in", "description"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+        "wire_name": {"type": "string", "description": "Name on the wire if different from the tool argument name."},
+        "type": {"enum": ["string", "number", "integer", "boolean"]},
+        "in": {"enum": ["path", "query", "header", "body"]},
+        "required": {"type": "boolean"},
+        "default": {},
+        "description": {"type": "string", "minLength": 3},
+        "constraints": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enum": {"type": "array"},
+            "pattern": {"type": "string"},
+            "min_length": {"type": "integer", "minimum": 0},
+            "max_length": {"type": "integer", "minimum": 0},
+            "minimum": {"type": "number"},
+            "maximum": {"type": "number"}
+          }
+        }
+      }
+    },
+    "example": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["args", "expect"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+        "args": {"type": "object"},
+        "mock": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "status": {"type": "integer"},
+            "body": {},
+            "raises": {"enum": ["ConnectTimeout", "ConnectError", "ReadTimeout", "ReadError"]}
+          },
+          "description": "What the offline mock transport answers with."
+        },
+        "expect": {
+          "oneOf": [
+            {"const": "ok"},
+            {"type": "object", "additionalProperties": false, "required": ["code", "retryable"],
+             "properties": {"code": {"type": "string"}, "retryable": {"type": "boolean"}}}
+          ]
+        },
+        "expect_keys": {"type": "array", "items": {"type": "string"}, "description": "Keys the successful result must contain."}
+      }
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "summary", "when_to_call", "side_effect", "request", "params", "response", "examples"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+        "summary": {"type": "string", "minLength": 10},
+        "when_to_call": {"type": "string", "minLength": 10},
+        "side_effect": {"enum": ["read", "write", "money"]},
+        "idempotent": {"type": "boolean"},
+        "requires": {"type": "array", "items": {"type": "string"}},
+        "request": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["method", "path"],
+          "properties": {
+            "method": {"enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]},
+            "path": {"type": "string", "pattern": "^/"},
+            "query_const": {"type": "object", "description": "Fixed query parameters sent on every call."}
+          }
+        },
+        "params": {"type": "array", "items": {"$ref": "#/definitions/param"}},
+        "response": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "description"],
+          "properties": {
+            "type": {"enum": ["object", "array"]},
+            "select": {"type": "string", "description": "Dotted path of the part of the JSON body to return."},
+            "description": {"type": "string", "minLength": 10}
+          }
+        },
+        "errors": {"type": "array", "items": {"$ref": "#/definitions/error_rule"}},
+        "examples": {"type": "array", "minItems": 1, "items": {"$ref": "#/definitions/example"}},
+        "review": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "safety_fields"],
+          "properties": {
+            "source": {"enum": ["human", "openapi", "har", "llm"]},
+            "safety_fields": {"enum": ["reviewed", "unreviewed"]},
+            "reviewer": {"type": "string"}
+          }
+        }
+      }
+    }
+  }
+}

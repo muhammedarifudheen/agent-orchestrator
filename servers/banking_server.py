@@ -10,16 +10,16 @@ change balances for the lifetime of the server process.
 """
 from __future__ import annotations
 
-import os
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
 from mcp.server.mcpserver import MCPServer
 
-from errors import ToolFailure, guarded
+from _base import ToolFailure, check_outage, make_tool
 
 mcp = MCPServer("banking")
+tool = make_tool(mcp)
 
 _CENT = Decimal("0.01")
 DAILY_LIMIT = Decimal("100000.00")  # per sending account, per UTC day, in the account's currency
@@ -76,10 +76,8 @@ def _money(value: Decimal) -> float:
 
 
 def _check_outage(tool: str) -> None:
-    if os.environ.get("BANKING_FAIL_MODE", "") == "core_down":
-        raise ToolFailure("CORE_BANKING_UNAVAILABLE",
-                          f"Core banking system is down (simulated: core_down) during {tool}.",
-                          retryable=True)
+    check_outage("BANKING_FAIL_MODE", tool, {"core_down": None}, code="CORE_BANKING_UNAVAILABLE",
+                 message=f"Core banking system is down during {tool}")
 
 
 def _get_account(account_id: str) -> dict:
@@ -90,8 +88,7 @@ def _get_account(account_id: str) -> dict:
     return account
 
 
-@mcp.tool()
-@guarded
+@tool(side_effect="read")
 def verify_kyc(customer_id: str) -> dict:
     """Look up a customer's KYC (know-your-customer) status and list their accounts. Read-only.
 
@@ -120,8 +117,7 @@ def verify_kyc(customer_id: str) -> dict:
             "account_ids": list(customer["account_ids"])}
 
 
-@mcp.tool()
-@guarded
+@tool(side_effect="read")
 def get_account_balance(account_id: str) -> dict:
     """Get the current balances and status of one account. Read-only.
 
@@ -147,16 +143,15 @@ def get_account_balance(account_id: str) -> dict:
             "as_of": _now()}
 
 
-@mcp.tool()
-@guarded
+@tool(side_effect="money", idempotent=False)
 def transfer_funds(from_acct: str, to_acct: str, amount: float) -> dict:
     """Move money between two accounts of the same currency. Executes IMMEDIATELY.
 
     NOT idempotent and has side effects: every successful call moves money again, so calling it
     twice transfers twice. Do NOT retry after a timeout or any unknown outcome without first
     calling get_account_balance on both accounts to see whether the transfer already happened.
-    Typical order: verify_kyc (sender's owner must be VERIFIED) -> get_account_balance (check
-    funds/status) -> transfer_funds -> get_account_balance (confirm).
+    Call only after verify_kyc (the sender's owner must be VERIFIED) and get_account_balance
+    (check funds/status); call get_account_balance again afterwards to confirm.
 
     Args:
         from_acct: Sending account id. Must be ACTIVE, and its owner's KYC must be VERIFIED.
@@ -168,7 +163,7 @@ def transfer_funds(from_acct: str, to_acct: str, amount: float) -> dict:
         Dict with transfer_id, status ("COMPLETED"), from_acct, to_acct, amount (float),
         currency, from_balance_after (float, 2 decimals) and timestamp (ISO-8601 UTC).
 
-    Errors (all retryable=false unless noted): INVALID_AMOUNT, SAME_ACCOUNT, ACCOUNT_NOT_FOUND,
+    Errors: all retryable=false unless noted: INVALID_AMOUNT, SAME_ACCOUNT, ACCOUNT_NOT_FOUND,
     ACCOUNT_FROZEN (either account not ACTIVE), CURRENCY_MISMATCH, KYC_NOT_VERIFIED,
     INSUFFICIENT_FUNDS, DAILY_LIMIT_EXCEEDED, CORE_BANKING_UNAVAILABLE (retryable=true, but
     the outcome may be unknown: check balances before retrying).
