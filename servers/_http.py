@@ -69,7 +69,8 @@ class HttpClient:
             name, value = p["name"], args.get(p["name"])
             if value is None:
                 if p.get("required"):
-                    raise ToolFailure("INVALID_ARGUMENT", f"'{name}' is required.", retryable=False)
+                    raise ToolFailure("INVALID_ARGUMENT", f"'{name}' is required.", retryable=False,
+                                      recovery="agent")
                 continue
             c = p.get("constraints") or {}
             problem = None
@@ -86,7 +87,8 @@ class HttpClient:
             elif "maximum" in c and value > c["maximum"]:
                 problem = f"must be <= {c['maximum']}"
             if problem:
-                raise ToolFailure("INVALID_ARGUMENT", f"'{name}' {problem} (got {value!r}).", retryable=False)
+                raise ToolFailure("INVALID_ARGUMENT", f"'{name}' {problem} (got {value!r}).",
+                                  retryable=False, recovery="agent")
 
     def _build(self, op: dict[str, Any], args: dict[str, Any]) -> tuple[str, dict, dict, Any]:
         base = (os.environ.get(self.system.get("base_url_env") or "") or self.system["base_url"]).rstrip("/")
@@ -120,16 +122,20 @@ class HttpClient:
             with httpx.Client(transport=self.transport, timeout=self.system.get("timeout_s", 10)) as client:
                 resp = client.request(op["method"], url, params=query or None, headers=headers, json=body)
         except (httpx.ConnectTimeout, httpx.PoolTimeout) as exc:  # never left this machine
-            raise ToolFailure("TIMEOUT", f"Could not connect in time ({type(exc).__name__}).", retryable=True) from exc
+            raise ToolFailure("TIMEOUT", f"Could not connect in time ({type(exc).__name__}).",
+                            retryable=True, recovery="agent") from exc
         except httpx.ConnectError as exc:
-            raise ToolFailure("NETWORK_ERROR", f"Could not connect: {exc}", retryable=True) from exc
+            raise ToolFailure("NETWORK_ERROR", f"Could not connect: {exc}", retryable=True,
+                            recovery="agent") from exc
         except httpx.TimeoutException as exc:  # request may have been processed
             if idempotent:
-                raise ToolFailure("TIMEOUT", f"{op_name} timed out ({type(exc).__name__}).", retryable=True) from exc
+                raise ToolFailure("TIMEOUT", f"{op_name} timed out ({type(exc).__name__}).",
+                                retryable=True, recovery="agent") from exc
             raise unknown_outcome(op_name) from exc
         except httpx.TransportError as exc:
             if idempotent:
-                raise ToolFailure("NETWORK_ERROR", f"Network error: {exc}", retryable=True) from exc
+                raise ToolFailure("NETWORK_ERROR", f"Network error: {exc}", retryable=True,
+                                recovery="agent") from exc
             raise unknown_outcome(op_name) from exc
 
         try:
@@ -139,12 +145,14 @@ class HttpClient:
         if resp.status_code >= 400:
             raise self._map_error(op, idempotent, resp.status_code, data, resp.text)
         if data is None:
-            raise ToolFailure("UNEXPECTED_RESPONSE", f"HTTP {resp.status_code} body is not JSON.", retryable=False)
+            raise ToolFailure("UNEXPECTED_RESPONSE", f"HTTP {resp.status_code} body is not JSON.",
+                            retryable=False, recovery="human")
         select = (op.get("response") or {}).get("select")
         if select:
             data = get_path(data, select)
             if data is _MISSING:
-                raise ToolFailure("UNEXPECTED_RESPONSE", f"Response has no '{select}' field.", retryable=False)
+                raise ToolFailure("UNEXPECTED_RESPONSE", f"Response has no '{select}' field.",
+                                retryable=False, recovery="human")
         return data
 
     def _map_error(self, op: dict[str, Any], idempotent: bool, status: int, body: Any, text: str) -> ToolFailure:
@@ -153,6 +161,7 @@ class HttpClient:
             if _rule_matches(rule["when"], status, body):
                 meaning = rule.get("meaning")
                 msg = f"{meaning} ({detail})" if meaning and detail else (meaning or detail)
-                return ToolFailure(rule["code"], f"HTTP {status}: {msg}", retryable=rule["retryable"])
-        code, retryable = standard_http_error(status, idempotent)
-        return ToolFailure(code, f"HTTP {status}: {detail}", retryable=retryable)
+                return ToolFailure(rule["code"], f"HTTP {status}: {msg}", retryable=rule["retryable"],
+                                   recovery=rule["recovery"])
+        code, retryable, recovery = standard_http_error(status, idempotent)
+        return ToolFailure(code, f"HTTP {status}: {detail}", retryable=retryable, recovery=recovery)

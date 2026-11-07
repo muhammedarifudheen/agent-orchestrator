@@ -14,30 +14,38 @@ import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
 SEP = "__"
-# Server error contract (servers/errors.py): "[CODE] retryable=<true|false> message"
+# Server error contract (servers/errors.py): "[CODE] retryable=<true|false> recovery=<agent|human> message"
 _CODE = re.compile(
-    r"^\s*(?:Error executing tool \S+:\s*)?\[([A-Z][A-Z0-9_]*)\]\s+retryable=(true|false)\s*(.*)", re.S
+    r"^\s*(?:Error executing tool \S+:\s*)?\[([A-Z][A-Z0-9_]*)\]\s+retryable=(true|false)"
+    r"\s+recovery=(agent|human)\s*(.*)", re.S
 )
 # The SDK itself rejects bad/missing arguments before the tool runs, with pydantic text that does
 # not follow the server contract. Normalize it here so the agent always sees [CODE] retryable=...
 _ARG_VALIDATION = re.compile(r"\d+ validation errors? for \w+Arguments")
 
 
-def parse_error(text: str) -> tuple[str, bool | None, str]:
-    """Parse an is_error text into (code, retryable, message). retryable None = unknown format."""
+class ParsedError(NamedTuple):
+    code: str
+    retryable: bool | None  # None = text did not follow the contract
+    recovery: str | None  # "agent" | "human" | None (unknown: callers must treat as human)
+    message: str
+
+
+def parse_error(text: str) -> ParsedError:
+    """Parse an is_error text. Anything not following the contract keeps retryable/recovery None."""
     m = _CODE.match(text)
     if m:
-        return m.group(1), m.group(2) == "true", m.group(3)
+        return ParsedError(m.group(1), m.group(2) == "true", m.group(3), m.group(4))
     if _ARG_VALIDATION.search(text):
         lines = [ln.strip() for ln in text.splitlines() if ln.strip() and "errors.pydantic.dev" not in ln]
-        return "INVALID_ARGUMENTS", False, "; ".join(lines[:6])[:400]
-    return "TOOL_ERROR", None, text or "unknown error"
+        return ParsedError("INVALID_ARGUMENTS", False, "agent", "; ".join(lines[:6])[:400])
+    return ParsedError("TOOL_ERROR", None, None, text or "unknown error")
 
 
 @dataclass
@@ -50,6 +58,7 @@ class ToolOutcome:
     error_code: str | None = None
     error_message: str | None = None
     retryable: bool | None = None  # None = unknown (error did not follow the contract)
+    recovery: str | None = None  # "agent" | "human"; None = unknown, treated as human
     duration_ms: int = 0
 
     def to_llm_text(self) -> str:
@@ -57,7 +66,7 @@ class ToolOutcome:
         if self.ok:
             return json.dumps(self.data, ensure_ascii=False, default=str)
         flag = "unknown" if self.retryable is None else str(self.retryable).lower()
-        return f"[{self.error_code}] retryable={flag} {self.error_message}"
+        return f"[{self.error_code}] retryable={flag} recovery={self.recovery or 'unknown'} {self.error_message}"
 
 
 @dataclass
@@ -107,22 +116,23 @@ class ToolRegistry:
         """Call a tool. Never raises: all failures come back as ``ToolOutcome(ok=False)``."""
         start = time.monotonic()
 
-        def fail(code: str, msg: str, retryable: bool | None = None) -> ToolOutcome:
+        def fail(code: str, msg: str, retryable: bool | None = None, recovery: str | None = None) -> ToolOutcome:
             return ToolOutcome(False, qualified_name, error_code=code, error_message=msg,
-                               retryable=retryable, duration_ms=int((time.monotonic() - start) * 1000))
+                               retryable=retryable, recovery=recovery, duration_ms=int((time.monotonic() - start) * 1000))
 
         if qualified_name not in self._tools:
-            return fail("UNKNOWN_TOOL", f"No tool named '{qualified_name}'.", retryable=False)
+            return fail("UNKNOWN_TOOL", f"No tool named '{qualified_name}'.", retryable=False, recovery="agent")
         server, _, tool = qualified_name.partition(SEP)
         try:
             result = await self._sessions[server].call_tool(tool, args)
         except Exception as exc:  # transport/protocol failure
-            return fail("TRANSPORT_ERROR", f"{type(exc).__name__}: {exc}", retryable=True)
+            return fail("TRANSPORT_ERROR", f"{type(exc).__name__}: {exc}", retryable=False,
+                        recovery="human")  # a call may have been delivered: outcome unknown
 
         text = "\n".join(getattr(c, "text", "") for c in result.content).strip()
         if result.is_error:
-            code, retryable, message = parse_error(text)
-            return fail(code, message, retryable=retryable)
+            e = parse_error(text)
+            return fail(e.code, e.message, retryable=e.retryable, recovery=e.recovery)
         data: Any = result.structured_content
         if isinstance(data, dict) and set(data) == {"result"}:  # SDK wraps non-dict returns
             data = data["result"]

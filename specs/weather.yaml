@@ -7,8 +7,8 @@ base_url_env: WEATHER_BASE_URL
 timeout_s: 10
 auth: {kind: none}
 error_map:
-  - {when: {status: 429}, code: RATE_LIMITED, retryable: true, meaning: "Free-tier rate limit reached; retry later"}
-  - {when: {status: 5xx}, code: SERVICE_UNAVAILABLE, retryable: true, meaning: "Weather service is unavailable"}
+  - {when: {status: 429}, code: RATE_LIMITED, retryable: true, recovery: agent, meaning: "Free-tier rate limit reached; retry later"}
+  - {when: {status: 5xx}, code: SERVICE_UNAVAILABLE, retryable: true, recovery: agent, meaning: "Weather service is unavailable"}
 
 operations:
   - name: get_current_weather
@@ -32,7 +32,7 @@ operations:
       select: current_weather
       description: "time (ISO8601, GMT), temperature (deg C), windspeed (km/h), winddirection (deg), is_day (0/1), weathercode (WMO code), interval (s)."
     errors:
-      - {when: {status: 400}, code: INVALID_COORDINATES, retryable: false, meaning: "Coordinates were rejected by the weather service"}
+      - {when: {status: 400}, code: INVALID_COORDINATES, retryable: false, recovery: agent, meaning: "Coordinates were rejected by the weather service"}
     examples:
       - name: delhi
         args: {latitude: 28.61, longitude: 77.21}
@@ -43,19 +43,19 @@ operations:
         expect_keys: [temperature, windspeed, weathercode]
       - name: latitude_out_of_range
         args: {latitude: 999, longitude: 77.21}
-        expect: {code: INVALID_ARGUMENT, retryable: false}
+        expect: {code: INVALID_ARGUMENT, retryable: false, recovery: agent}
       - name: server_rejects_coordinates
         args: {latitude: 10, longitude: 10}
         mock: {status: 400, body: {error: true, reason: "Latitude must be in range of -90 to 90. Given: 999.0."}}
-        expect: {code: INVALID_COORDINATES, retryable: false}
+        expect: {code: INVALID_COORDINATES, retryable: false, recovery: agent}
       - name: rate_limited
         args: {latitude: 10, longitude: 10}
         mock: {status: 429, body: {error: true, reason: "Too many requests"}}
-        expect: {code: RATE_LIMITED, retryable: true}
+        expect: {code: RATE_LIMITED, retryable: true, recovery: agent}
       - name: read_timeout_is_retryable_for_reads
         args: {latitude: 10, longitude: 10}
         mock: {raises: ReadTimeout}
-        expect: {code: TIMEOUT, retryable: true}
+        expect: {code: TIMEOUT, retryable: true, recovery: agent}
 
   - name: get_daily_forecast
     summary: Get the daily min/max temperature and precipitation forecast for the next days.
@@ -78,7 +78,7 @@ operations:
       select: daily
       description: "Parallel arrays: time (dates), temperature_2m_max and temperature_2m_min (deg C), precipitation_sum (mm)."
     errors:
-      - {when: {status: 400}, code: INVALID_REQUEST, retryable: false, meaning: "The weather service rejected the request"}
+      - {when: {status: 400}, code: INVALID_REQUEST, retryable: false, recovery: agent, meaning: "The weather service rejected the request"}
     examples:
       - name: two_days_delhi
         args: {latitude: 28.61, longitude: 77.21, days: 2}
@@ -89,12 +89,12 @@ operations:
         expect_keys: [time, temperature_2m_max, temperature_2m_min]
       - name: too_many_days
         args: {latitude: 28.61, longitude: 77.21, days: 99}
-        expect: {code: INVALID_ARGUMENT, retryable: false}
+        expect: {code: INVALID_ARGUMENT, retryable: false, recovery: agent}
       - name: service_down
         args: {latitude: 28.61, longitude: 77.21}
         mock: {status: 503, body: {error: true, reason: "maintenance"}}
-        expect: {code: SERVICE_UNAVAILABLE, retryable: true}
+        expect: {code: SERVICE_UNAVAILABLE, retryable: true, recovery: agent}
       - name: malformed_success_body
         args: {latitude: 28.61, longitude: 77.21}
         mock: {status: 200, body: {unexpected: true}}
-        expect: {code: UNEXPECTED_RESPONSE, retryable: false}
+        expect: {code: UNEXPECTED_RESPONSE, retryable: false, recovery: human}

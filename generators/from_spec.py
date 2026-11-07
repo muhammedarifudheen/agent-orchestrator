@@ -80,19 +80,20 @@ def _is_idempotent(op: dict[str, Any]) -> bool:
 
 
 def _error_summary(spec: dict[str, Any], op: dict[str, Any]) -> str:
-    seen: dict[str, bool] = {"INVALID_ARGUMENT": False}
+    idem = _is_idempotent(op)
+    seen: dict[str, tuple[bool, str]] = {"INVALID_ARGUMENT": (False, "agent")}
     for rule in list(op.get("errors", [])) + list(spec.get("error_map", [])):
-        seen.setdefault(rule["code"], rule["retryable"])
-    seen.setdefault("AUTH_FAILED", False)
+        seen.setdefault(rule["code"], (rule["retryable"], rule["recovery"]))
+    seen.setdefault("AUTH_FAILED", (False, "human"))
     if any(p["in"] == "path" for p in op["params"]):
-        seen.setdefault("NOT_FOUND", False)
-    if _is_idempotent(op):
-        seen.update({"TIMEOUT": True, "NETWORK_ERROR": True})
+        seen.setdefault("NOT_FOUND", (False, "agent"))
+    if idem:
+        seen.update({"TIMEOUT": (True, "agent"), "NETWORK_ERROR": (True, "agent")})
     else:
-        seen["OUTCOME_UNKNOWN"] = False
-    seen.setdefault("UNEXPECTED_RESPONSE", False)
-    seen.setdefault("SERVICE_UNAVAILABLE", _is_idempotent(op))
-    parts = [f"{c} (retryable={'true' if r else 'false'})" for c, r in seen.items()]
+        seen["OUTCOME_UNKNOWN"] = (False, "human")
+    seen.setdefault("UNEXPECTED_RESPONSE", (False, "human"))
+    seen.setdefault("SERVICE_UNAVAILABLE", (idem, "agent" if idem else "human"))
+    parts = [f"{c} (retryable={'true' if r else 'false'}, recovery={w})" for c, (r, w) in seen.items()]
     return "\n".join(textwrap.wrap("Errors: " + ", ".join(parts) + ".", 96, subsequent_indent="    "))
 
 
@@ -210,7 +211,7 @@ def render_tests(spec: dict[str, Any], spec_file: str, digest: str) -> str:
         "",
         "EXAMPLES = " + pprint.pformat(examples, width=100, sort_dicts=False),
         f"OPERATIONS = {[o['name'] for o in spec['operations']]!r}",
-        "CODE = re.compile(r\"\\[([A-Z][A-Z0-9_]*)\\] retryable=(true|false) \")",
+        "CODE = re.compile(r\"\\[([A-Z][A-Z0-9_]*)\\] retryable=(true|false) recovery=(agent|human) \")",
         "",
         "",
         "def _transport(mock):",
@@ -242,9 +243,11 @@ def render_tests(spec: dict[str, Any], spec_file: str, digest: str) -> str:
         "    else:",
         "        assert result.is_error, f\"expected failure {expect}, got success: {_text(result)}\"",
         "        m = CODE.search(_text(result))",
-        "        assert m, f\"error does not follow '[CODE] retryable=<bool> message': {_text(result)!r}\"",
+        "        assert m, f\"error does not follow '[CODE] retryable=<bool> recovery=<r> message': {_text(result)!r}\"",
         "        assert m.group(1) == expect[\"code\"], _text(result)",
         "        assert (m.group(2) == \"true\") is expect[\"retryable\"], _text(result)",
+        "        if \"recovery\" in expect:",
+        "            assert m.group(3) == expect[\"recovery\"], _text(result)",
         "",
         "",
         "async def test_tools_discovered():",

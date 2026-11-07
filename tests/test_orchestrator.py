@@ -60,19 +60,29 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.state.failed, [])
         self.assertEqual(files, [])
 
-    async def test_non_retryable_sold_out_hands_off_without_trying_another_flight(self):
-        # SOLD_OUT is retryable=false: policy is an immediate human handoff, no fallback booking
+    async def test_sold_out_is_recovered_by_choosing_another_flight(self):
+        # SOLD_OUT is retryable=false but recovery=agent: the agent gets ONE self-correction
         turns = [
             [use("1", "travel__book_flight", flight_id=f"UK-995_DELBOM_{TOMORROW}",
                  passenger_name="A B", passenger_email="a@b.co")],
             [use("2", "travel__book_flight", flight_id=f"AI-865_DELBOM_{TOMORROW}",
                  passenger_name="A B", passenger_email="a@b.co")],
+            [say("Booked the other flight.")],
         ]
         result, files = await self._run(turns)
+        self.assertTrue(result.success)
+        self.assertEqual([o.error_code for o in result.state.failed], ["SOLD_OUT"])
+        self.assertEqual(files, [])
+
+    async def test_second_failure_of_the_same_tool_hands_off(self):
+        sold_out = lambda i: [use(i, "travel__book_flight", flight_id=f"UK-995_DELBOM_{TOMORROW}",
+                                  passenger_name="A B", passenger_email="a@b.co")]
+        result, files = await self._run([sold_out("1"), sold_out("2"), sold_out("3")])
         self.assertFalse(result.success)
-        self.assertEqual(len(result.handoff.attempted_operations), 1)
+        self.assertEqual(len(result.handoff.attempted_operations), 2)
         self.assertEqual(result.handoff.error_snapshot["error_code"], "SOLD_OUT")
-        self.assertIs(result.handoff.error_snapshot["retryable"], False)
+        self.assertEqual(result.handoff.error_snapshot["recovery"], "agent")
+        self.assertIn("could not self-correct", result.handoff.reason)
         self.assertEqual(len(files), 1)
 
     async def test_handoff_on_consecutive_retryable_failures(self):

@@ -19,7 +19,7 @@ from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
 ROOT = Path(__file__).parent.parent
-ERROR_TEXT = re.compile(r"\[([A-Z][A-Z0-9_]*)\]\s+retryable=(true|false)\s+(.*)", re.S)
+ERROR_TEXT = re.compile(r"\[([A-Z][A-Z0-9_]*)\]\s+retryable=(true|false)\s+recovery=(agent|human)\s+(.*)", re.S)
 TOMORROW = (date.today() + timedelta(days=1)).isoformat()
 
 

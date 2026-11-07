@@ -8,41 +8,14 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 
 import pytest
-from mcp import Client
 
 import retail_server
 from agent.orchestrator import Orchestrator
-from agent.tool_registry import ToolRegistry
-from errors import ToolFailure
+from inmem import SpyRegistry
 
 SERVERS = Path(__file__).parent.parent / "servers"
 GOAL = "Buy 2 units of SKU-1001 for customer C-1001 and ship them to 12 MG Road, Pune 411001."
 FILENAME = re.compile(r"^\d{8}_\d{6}_tester\.json$")
-
-
-class InMemoryRegistry(ToolRegistry):
-    """Same registry, but servers run in-process so tests can monkeypatch their tools."""
-
-    async def _connect(self, name: str, script: Path) -> None:
-        import importlib
-
-        module = importlib.import_module(script.stem)
-        client = await self._stack.enter_async_context(Client(module.mcp))
-        self._sessions[name] = client  # Client exposes list_tools/call_tool like ClientSession
-        for tool in (await client.list_tools()).tools:
-            self._tools[f"retail__{tool.name}"] = {
-                "name": f"retail__{tool.name}", "description": tool.description or "",
-                "input_schema": tool.input_schema}
-
-
-class SpyRegistry(InMemoryRegistry):
-    """Records every tool call that actually reaches a server."""
-
-    calls: list[str]
-
-    async def call(self, qualified_name, args):
-        self.__dict__.setdefault("calls", []).append(qualified_name)
-        return await super().call(qualified_name, args)
 
 
 class ScriptedLLM:
@@ -88,29 +61,6 @@ class ScriptedLLM:
         return NS(content=[NS(type="text", text="Continuing anyway."), ship()])
 
 
-@pytest.fixture(autouse=True)
-def fresh_retail_state():
-    retail_server._reset_state()
-    yield
-    retail_server._reset_state()
-
-
-@pytest.fixture
-def card_declined():
-    """Monkeypatch charge_payment so it raises ToolFailure(CARD_DECLINED, retryable=False)."""
-    original = retail_server.charge_payment
-
-    def charge_payment(order_id: str, amount: float) -> dict:
-        """Charge the customer for an order. Call after create_order. (patched to fail)"""
-        raise ToolFailure(code="CARD_DECLINED", message="Issuer declined the card.", retryable=False)
-
-    retail_server.mcp.remove_tool("charge_payment")
-    retail_server.mcp.add_tool(charge_payment, name="charge_payment")
-    yield
-    retail_server.mcp.remove_tool("charge_payment")
-    retail_server.mcp.add_tool(original, name="charge_payment")
-
-
 async def run(tmp_path: Path, llm: ScriptedLLM, **kw):
     async with SpyRegistry(SERVERS, pattern="retail_server.py") as reg:
         orch = Orchestrator(reg, client=llm, handoff_dir=tmp_path, user_id="tester", **kw)
@@ -141,11 +91,12 @@ async def test_non_retryable_failure_writes_handoff_json_and_stops(tmp_path, car
     data = json.loads(raw)
 
     assert data["goal"] == GOAL and data["user"] == "tester"
-    assert "Non-retryable" in data["reason"]
+    assert "Human required" in data["reason"] and "recovery=human" in data["reason"]
     assert data["error_snapshot"] == {
         "step": 3, "tool": "retail__charge_payment",
         "arguments": data["error_snapshot"]["arguments"], "error_code": "CARD_DECLINED",
-        "error_message": "Issuer declined the card.", "retryable": False, "consecutive_failures": 1}
+        "error_message": "Issuer declined the card.", "retryable": False, "recovery": "human",
+        "consecutive_failures": 1, "consecutive_retryable": 0}
     assert data["error_snapshot"]["arguments"]["order_id"].startswith("ORD-")
 
     # decision log: each step has thought, tool, args, result; completed steps precede the failure

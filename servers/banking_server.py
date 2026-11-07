@@ -84,7 +84,7 @@ def _get_account(account_id: str) -> dict:
     # TODO(real-api): fetch the account from the core-banking system.
     account = _ACCOUNTS.get(account_id)
     if account is None:
-        raise ToolFailure("ACCOUNT_NOT_FOUND", f"No account '{account_id}'.", retryable=False)
+        raise ToolFailure("ACCOUNT_NOT_FOUND", f"No account '{account_id}'.", retryable=False, recovery="agent")
     return account
 
 
@@ -111,7 +111,7 @@ def verify_kyc(customer_id: str) -> dict:
     # TODO(real-api): call the KYC provider / customer master.
     customer = _CUSTOMERS.get(customer_id.strip())
     if customer is None:
-        raise ToolFailure("CUSTOMER_NOT_FOUND", f"No customer '{customer_id}'.", retryable=False)
+        raise ToolFailure("CUSTOMER_NOT_FOUND", f"No customer '{customer_id}'.", retryable=False, recovery="agent")
     return {"customer_id": customer_id.strip(), "kyc_status": customer["kyc_status"],
             "verified_at": customer["verified_at"], "risk_level": customer["risk_level"],
             "account_ids": list(customer["account_ids"])}
@@ -173,39 +173,39 @@ def transfer_funds(from_acct: str, to_acct: str, amount: float) -> dict:
     try:
         value = Decimal(str(amount))
     except ArithmeticError:
-        raise ToolFailure("INVALID_AMOUNT", f"'{amount}' is not a valid amount.", retryable=False) from None
+        raise ToolFailure("INVALID_AMOUNT", f"'{amount}' is not a valid amount.", retryable=False, recovery="agent") from None
     if not value.is_finite() or value <= 0:
-        raise ToolFailure("INVALID_AMOUNT", "Amount must be greater than 0.", retryable=False)
+        raise ToolFailure("INVALID_AMOUNT", "Amount must be greater than 0.", retryable=False, recovery="agent")
     if value != value.quantize(_CENT):
-        raise ToolFailure("INVALID_AMOUNT", "Amount may have at most 2 decimal places.", retryable=False)
+        raise ToolFailure("INVALID_AMOUNT", "Amount may have at most 2 decimal places.", retryable=False, recovery="agent")
     value = value.quantize(_CENT)
     if from_acct == to_acct:
-        raise ToolFailure("SAME_ACCOUNT", "from_acct and to_acct must differ.", retryable=False)
+        raise ToolFailure("SAME_ACCOUNT", "from_acct and to_acct must differ.", retryable=False, recovery="agent")
 
     src, dst = _get_account(from_acct), _get_account(to_acct)
     for acct_id, acct in ((from_acct, src), (to_acct, dst)):
         if acct["status"] != "ACTIVE":
-            raise ToolFailure("ACCOUNT_FROZEN", f"Account '{acct_id}' is {acct['status']}.", retryable=False)
+            raise ToolFailure("ACCOUNT_FROZEN", f"Account '{acct_id}' is {acct['status']}.", retryable=False, recovery="human")
     if src["currency"] != dst["currency"]:
         raise ToolFailure("CURRENCY_MISMATCH",
                           f"{from_acct} is {src['currency']} but {to_acct} is {dst['currency']}.",
-                          retryable=False)
+                          retryable=False, recovery="human")
     # TODO(real-api): re-check KYC against the live KYC provider.
     kyc = _CUSTOMERS[src["customer_id"]]["kyc_status"]
     if kyc != "VERIFIED":
         raise ToolFailure("KYC_NOT_VERIFIED", f"Sender's KYC status is {kyc}; must be VERIFIED.",
-                          retryable=False)
+                          retryable=False, recovery="human")
     if src["available"] < value:
         raise ToolFailure("INSUFFICIENT_FUNDS",
                           f"Available balance {_money(src['available'])} is less than {value}.",
-                          retryable=False)
+                          retryable=False, recovery="human")
     now = _now()
     key = (from_acct, now[:10])
     spent = _DAILY_SPENT.get(key, Decimal("0"))
     if spent + value > DAILY_LIMIT:
         raise ToolFailure("DAILY_LIMIT_EXCEEDED",
                           f"Daily limit {DAILY_LIMIT} exceeded (already sent {spent} today).",
-                          retryable=False)
+                          retryable=False, recovery="human")
 
     # TODO(real-api): post the debit/credit pair to the core-banking ledger atomically.
     src["available"] -= value

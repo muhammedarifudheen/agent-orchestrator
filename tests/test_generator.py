@@ -12,7 +12,7 @@ import yaml
 from mcp import Client
 
 from generators.from_spec import ROOT, SpecError, generate, load_spec
-from parse_helpers import parse
+from parse_helpers import parse, parse_full
 from _http import HttpClient
 from errors import ToolFailure, guarded
 
@@ -37,7 +37,7 @@ PAYMENTS = {
             {"name": "ok", "args": {"amount": 5.0}, "mock": {"status": 201, "body": {"payment_id": "P1", "status": "OK"}},
              "expect": "ok", "expect_keys": ["payment_id"]},
             {"name": "read_timeout", "args": {"amount": 5.0}, "mock": {"raises": "ReadTimeout"},
-             "expect": {"code": "OUTCOME_UNKNOWN", "retryable": False}},
+             "expect": {"code": "OUTCOME_UNKNOWN", "retryable": False, "recovery": "human"}},
         ],
         "review": {"source": "human", "safety_fields": "reviewed", "reviewer": "test"},
     }],
@@ -132,10 +132,11 @@ async def test_generated_money_server_never_calls_a_timed_out_write_retryable(tm
             res = await call(respond(raises=raises))
             assert res.is_error
             assert parse(res) == (code, retryable), raises
+            assert parse_full(res)[2] == ("human" if code == "OUTCOME_UNKNOWN" else "agent"), raises
         res = await call(respond(status=500, body={"error": "x"}))  # 5xx on a write: outcome uncertain
-        assert parse(res) == ("SERVICE_UNAVAILABLE", False)
+        assert parse_full(res) == ("SERVICE_UNAVAILABLE", False, "human")  # write + 5xx: outcome uncertain
         res = await call(respond(status=429, body={}))  # rejected before processing: safe to retry
-        assert parse(res) == ("RATE_LIMITED", True)
+        assert parse_full(res) == ("RATE_LIMITED", True, "agent")
     finally:
         sys.modules.pop("ledger_server", None)
 

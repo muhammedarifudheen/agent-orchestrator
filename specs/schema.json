@@ -31,7 +31,7 @@
     "error_rule": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["when", "code", "retryable"],
+      "required": ["when", "code", "retryable", "recovery"],
       "properties": {
         "when": {
           "type": "object",
@@ -43,7 +43,8 @@
           }
         },
         "code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"},
-        "retryable": {"type": "boolean"},
+        "retryable": {"type": "boolean", "description": "May the same call succeed if repeated later?"},
+        "recovery": {"enum": ["agent", "human"], "description": "Who can resolve it: the agent (fix args, look up an id, retry once) or a human (business decline, auth, state conflict, unknown outcome)."},
         "meaning": {"type": "string"}
       }
     },
@@ -94,7 +95,8 @@
           "oneOf": [
             {"const": "ok"},
             {"type": "object", "additionalProperties": false, "required": ["code", "retryable"],
-             "properties": {"code": {"type": "string"}, "retryable": {"type": "boolean"}}}
+             "properties": {"code": {"type": "string"}, "retryable": {"type": "boolean"},
+                            "recovery": {"enum": ["agent", "human"]}}}
           ]
         },
         "expect_keys": {"type": "array", "items": {"type": "string"}, "description": "Keys the successful result must contain."}

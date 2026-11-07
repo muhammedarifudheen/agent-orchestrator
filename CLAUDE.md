@@ -29,13 +29,35 @@ by adding MCP servers only — never by changing the Agent layer.
   Domain-free system prompt, domain-free code.
 - **Exception routing layer** — failures are never swallowed. Each failed call is fed back to
   Claude (so it can retry with other args or pick another tool) AND recorded in `ExecutionState`.
-  A handoff fires after any tool call that fails with `retryable=false`, or when
-  `consecutive_failures >= 2` (any success resets the counter). The run stops at once: remaining
-  calls of that turn are skipped (recorded, not executed) and the LLM is not called again. The
-  handoff also fires on step-limit or LLM/API failure. It writes
-  `handoffs/YYYYMMDD_HHMMSS_<user>.json` with: goal, user, reason, `error_snapshot` (the triggering
-  failure), `steps` (thought, tool, args, result per call), `current_state` (what already succeeded
-  - e.g. an order that must not be created twice - plus skipped calls), and the text decision log.
+  Every failure states two facts: `retryable` (may the same call succeed later?) and `recovery`
+  (`agent` = the agent can fix it; `human` = it needs a person). Policy, evaluated after every call:
+  1. `recovery=human`, or an error that states no recovery (fail safe): hand off at once.
+  2. `retryable=true` failures in a row >= 2: hand off (a success or any other outcome resets the run).
+  3. `recovery=agent`: the agent gets ONE self-correction per tool. The first failure is fed back to
+     Claude with the error text plus that tool's parameter hints (its `Args:` docs + schema); the
+     second failure of the same tool (since it last succeeded) hands off.
+  On handoff the run stops at once: remaining calls of that turn are skipped (recorded, not executed)
+  and the LLM is not called again. It also fires on step limit or LLM/API failure, and when the
+  agent stops while its last call was still failing. It writes
+  `handoffs/YYYYMMDD_HHMMSS_<user_id>.json` with: goal, user, reason, `error_snapshot` (the
+  triggering failure incl. retryable/recovery), `steps` (thought, tool, args, result per call),
+  `current_state` (what already succeeded - e.g. an order that must not be created twice - plus
+  skipped calls and the failure counters), and the text decision log.
+
+### Recorded decisions (error contract + handoff)
+These were NOT written down when first made; this is the record, reconstructed in the turn that
+implemented them. Change them here first, then in code.
+- D1. Failure text is `[CODE] retryable=<true|false> recovery=<agent|human> message`. `recovery` is
+  mandatory on every `ToolFailure`; there is no default.
+- D2. `recovery=agent`: bad/missing/mistyped arguments, an id the agent can look up again, wrong call
+  order, a transient fault worth one retry, a sold-out choice it can replace.
+  `recovery=human`: business declines (card declined, insufficient funds, frozen account, KYC, limit),
+  state conflicts that could duplicate a side effect (ALREADY_PAID, ALREADY_SHIPPED), auth/permission,
+  unknown outcomes (OUTCOME_UNKNOWN), internal faults, unparseable responses.
+- D3. `retryable` and `recovery` are independent: INVALID_DATE is retryable=false, recovery=agent.
+- D4. The consecutive-failure limit (2) applies to `retryable=true` failures only.
+- D5. The `<user_id>` in the handoff filename is `Orchestrator(user_id=...)`, defaulting to the OS
+  username (sanitized). Pass the real end-user id from the calling application.
 
 ## Architecture: genericity
 
@@ -88,8 +110,8 @@ system: <name>                       # tool prefix
 transport: {kind: http|mock, base_url_env: X_BASE_URL, timeout_s: 10}
 auth: {kind: none|api_key|bearer|basic|oauth_client_credentials, env: [..]}
 error_map:                           # system-wide defaults, per-operation overrides win
-  - {when: {status: 429}, code: RATE_LIMITED, retryable: true}
-  - {when: {status: 5xx}, code: SERVICE_UNAVAILABLE, retryable: true}
+  - {when: {status: 429}, code: RATE_LIMITED, retryable: true, recovery: agent}
+  - {when: {status: 5xx}, code: SERVICE_UNAVAILABLE, retryable: true, recovery: agent}
 operations:
   - name: query_account_balance
     summary: one sentence             # docstring line 1
@@ -100,7 +122,7 @@ operations:
     request: {method: GET, path: /accounts/{account_id}}
     params: [{name, type, in: path|query|body, required, description, constraints: {pattern, enum, minimum, multiple_of}}]
     response: {description, select: "$.data", fields: [..]}
-    errors: [{when: {status: 409, body: {code: FROZEN}}, code: ACCOUNT_FROZEN, retryable: false, meaning: ".."}]
+    errors: [{when: {status: 409, body: {code: FROZEN}}, code: ACCOUNT_FROZEN, retryable: false, recovery: human, meaning: ".."}]
     examples: [{args: {..}, expect: ok}, {args: {..}, expect: {code: INVALID_AMOUNT}}]
     review: {source: openapi|har|llm|human, safety_fields: reviewed|unreviewed}
 ```
@@ -181,7 +203,7 @@ The list of supported transports/auth kinds is the real boundary of "any".
 A single shared `tests/test_contract.py`, parametrized over every `servers/*_server.py`, asserting
 only system-independent properties: tools listed with non-empty docstrings containing a
 "Call"/when-to-call sentence and an `Errors:` line; every failing probe is `is_error=True` with text
-`[CODE] retryable=<bool> message`; a raw exception becomes `INTERNAL_ERROR retryable=false`;
+`[CODE] retryable=<bool> recovery=<agent|human> message`; a raw exception becomes `INTERNAL_ERROR retryable=false recovery=human`;
 `write`/`money` tools declare idempotency; the outage switch yields a retryable code; nothing returns
 a normal result containing an error. Probes come from the spec's `examples` (for hand-written
 servers, from `specs/<name>.probes.yaml`).
@@ -237,7 +259,7 @@ for composites; count them); P4 HAR and doc ingestion.
 Built and tested:
 - `servers/_base.py`: shared core for ALL servers (ToolFailure re-export, `make_tool` registration
   decorator with `side_effect`/`idempotent` safety annotations, `check_outage`, `auth_from_env`,
-  `standard_http_error` recovery mapping). The three hand-written servers use it.
+  `standard_http_error` (code, retryable, recovery) mapping). The three hand-written servers use it.
 - `servers/errors.py`: `@guarded` now takes `idempotent`. A timeout is `TIMEOUT retryable=true` for
   idempotent tools and `OUTCOME_UNKNOWN retryable=false` otherwise (fixes the double-charge risk).
 - `servers/_http.py`: generic HTTP runtime (arg constraints, auth from env, error_map, timeouts,
@@ -269,10 +291,10 @@ a messier system than a two-operation read-only API.
    it errors. Use `Args:` / `Returns:` sections.
 4. **Failures are raised, never returned.** (Use `_base.make_tool` so registration, `@guarded` and
    the safety annotations come together.) Tools must never return a normal dict containing an
-   error. Failures are raised as `ToolFailure(code, message, retryable)` from `servers/errors.py`,
+   error. Failures are raised as `ToolFailure(code, message, retryable, recovery)` from `servers/errors.py`,
    and every tool is wrapped in `@guarded` (directly under `@mcp.tool()`), which catches every
-   other exception internally and re-raises it as `ToolFailure("INTERNAL_ERROR", ..., False)`.
-   The agent sees `is_error=True` with the text `[CODE] retryable=<true|false> message`; the
+   other exception internally and re-raises it as `ToolFailure("INTERNAL_ERROR", ..., False, "human")`.
+   The agent sees `is_error=True` with the text `[CODE] retryable=<true|false> recovery=<agent|human> message` (see D1-D4); the
    registry parses it into `ToolOutcome.error_code / error_message / retryable`. Codes are
    UPPER_SNAKE (`FLIGHT_NOT_FOUND`, `SERVICE_UNAVAILABLE`). `retryable=true` means the same call may
    succeed later (timeouts, 429/5xx); `false` means the arguments or state must change. The

@@ -23,9 +23,11 @@ Today's date is {today}. Resolve relative dates ("tomorrow") against it.
 Rules:
 - Read each tool's description carefully, including argument formats and error codes.
 - Plan, then call tools in a sensible order, using earlier results as inputs to later calls.
-- If a tool fails, read the error code: fix the arguments and retry, or choose another tool or \
-approach. Do not repeat an identical failing call. Never repeat an action that already succeeded \
-(especially one with side effects).
+- A failed tool call says `recovery=agent` or `recovery=human`. With `recovery=agent` you get ONE \
+chance to fix it (correct the arguments, look an id up again, or retry once if it says retryable=true); \
+a second failure of the same tool ends the run. With `recovery=human` stop calling tools and say \
+plainly what needs a person. Do not repeat an identical failing call. Never repeat an action that \
+already succeeded (especially one with side effects).
 - If information that only the user can provide is missing and cannot be inferred from the \
 request, use sensible stated assumptions where harmless; otherwise say what is missing.
 - If you cannot make progress, stop and say plainly what failed. Never claim success you did \
@@ -45,6 +47,7 @@ class Operation:
     error_code: str | None = None
     error_message: str | None = None
     retryable: bool | None = None
+    recovery: str | None = None  # "agent" | "human" | None (unknown format: treated as human)
     duration_ms: int = 0
     thought: str = ""  # Claude's text in the same turn, before this call
 
@@ -56,7 +59,9 @@ class ExecutionState:
     goal: str
     operations: list[Operation] = field(default_factory=list)
     log: list[str] = field(default_factory=list)
-    consecutive_failures: int = 0
+    consecutive_failures: int = 0  # failures in a row of any kind (reset by any success)
+    consecutive_retryable: int = 0  # retryable=true failures in a row (reset by success or other outcome)
+    agent_failures: dict[str, int] = field(default_factory=dict)  # tool -> recovery=agent failures since its last success
     steps: int = 0
     skipped: list[dict[str, Any]] = field(default_factory=list)  # calls not run because of a handoff
 
@@ -93,7 +98,7 @@ class Handoff:
                  f"Reason : {self.reason}", f"Goal   : {self.goal}", f"User   : {self.user}", f"Time   : {self.created_at}",
                  "", f"Attempted operations ({len(self.attempted_operations)}):"]
         for o in self.attempted_operations:
-            status = "OK  " if o["ok"] else f"FAIL[{o['error_code']}, retryable={o['retryable']}]"
+            status = "OK  " if o["ok"] else f"FAIL[{o['error_code']}, retryable={o['retryable']}, recovery={o['recovery']}]"
             lines.append(f"  #{o['step']} {status} {o['tool']} {json.dumps(o['arguments'], default=str)}")
             if not o["ok"]:
                 lines.append(f"       -> {o['error_message']}")
@@ -145,6 +150,7 @@ class Orchestrator:
         state = ExecutionState(goal=goal)
         self._log(state, f"GOAL: {goal}")
         tools = self.registry.anthropic_tools()
+        self._tool_defs = {t["name"]: t for t in tools}
         self._log(state, f"TOOLS AVAILABLE: {', '.join(t['name'] for t in tools) or '(none)'}")
         if not tools:
             return self._escalate(state, "No tools available (all MCP servers failed to connect: "
@@ -186,17 +192,23 @@ class Orchestrator:
                 self._log(state, f"[step {state.steps}] CALL {call.name}({json.dumps(args, default=str)})")
                 out = await self.registry.call(call.name, args)
                 op = Operation(state.steps, call.name, args, out.ok, out.data if out.ok else None,
-                               out.error_code, out.error_message, out.retryable, out.duration_ms, thought)
+                               out.error_code, out.error_message, out.retryable, out.recovery, out.duration_ms, thought)
                 state.operations.append(op)
                 state.consecutive_failures = 0 if out.ok else state.consecutive_failures + 1
+                self._track(state, op)
                 self._log(state, f"[step {state.steps}] RESULT {call.name}: "
                           + (out.to_llm_text()[:500] if out.ok else out.to_llm_text()))
-                results.append({"type": "tool_result", "tool_use_id": call.id,
-                                "content": out.to_llm_text(), "is_error": not out.ok})
                 reason = self._handoff_reason(state, op)
                 if reason:  # stop NOW: skip the rest of this turn's calls, never call the LLM again
                     state.skipped = [{"tool": c.name, "arguments": dict(c.input or {})} for c in calls[i + 1:]]
+                    results.append({"type": "tool_result", "tool_use_id": call.id,
+                                    "content": out.to_llm_text(), "is_error": True})
                     return self._escalate(state, reason, last_text, trigger=op)
+                hint = "" if out.ok else self._self_correct_hint(op)
+                if hint:
+                    self._log(state, f"[step {state.steps}] RE-PROMPT (one self-correction allowed): {hint.strip()[:300]}")
+                results.append({"type": "tool_result", "tool_use_id": call.id,
+                                "content": out.to_llm_text() + hint, "is_error": not out.ok})
             messages.append({"role": "user", "content": results})
 
         return self._escalate(state, f"Step limit ({self.max_steps}) reached without completing "
@@ -204,17 +216,57 @@ class Orchestrator:
 
     # -- exception routing -------------------------------------------------------------------
 
+    @staticmethod
+    def _track(state: ExecutionState, op: Operation) -> None:
+        """Update the failure counters after every tool call."""
+        if op.ok:
+            state.consecutive_retryable = 0
+            state.agent_failures.pop(op.tool, None)
+            return
+        state.consecutive_retryable = state.consecutive_retryable + 1 if op.retryable is True else 0
+        if op.recovery == "agent":
+            state.agent_failures[op.tool] = state.agent_failures.get(op.tool, 0) + 1
+
     def _handoff_reason(self, state: ExecutionState, op: Operation) -> str | None:
-        """Handoff policy, evaluated after every tool call. None = keep going."""
+        """Recovery-aware handoff policy, evaluated after every tool call. None = keep going.
+
+        1. recovery=human (or an error that did not follow the contract): hand off at once.
+        2. consecutive retryable=true failures >= max_consecutive_failures (default 2): hand off.
+        3. recovery=agent: the agent gets ONE self-correction per tool; the second failure of the
+           same tool (since that tool last succeeded) hands off.
+        """
         if op.ok:
             return None
-        if op.retryable is False:
-            return (f"Non-retryable failure [{op.error_code}] from {op.tool}: {op.error_message} "
-                    "(repeating the action cannot succeed).")
-        if state.consecutive_failures >= self.max_consecutive_failures:
-            return (f"{state.consecutive_failures} consecutive tool failures; "
-                    "automated recovery exhausted.")
+        where = f"[{op.error_code}] from {op.tool}: {op.error_message}"
+        if op.recovery == "human":
+            return f"Human required {where} (recovery=human)."
+        if op.recovery != "agent":
+            return f"Human required {where} (error did not state a recovery path; failing safe)."
+        if state.consecutive_retryable >= self.max_consecutive_failures:
+            return (f"{state.consecutive_retryable} consecutive retryable failures; "
+                    f"automated recovery exhausted. Last: {where}")
+        if state.agent_failures.get(op.tool, 0) >= 2:
+            return f"Agent could not self-correct {op.tool}: second recovery=agent failure. Last: {where}"
         return None
+
+    def _self_correct_hint(self, op: Operation) -> str:
+        """Text appended to the FIRST recovery=agent failure of a tool: the one re-prompt."""
+        if op.recovery != "agent":
+            return ""
+        how = ("This may be transient: you may repeat the same call once."
+               if op.retryable else "Correct the arguments (or choose a different approach) and call again once.")
+        return (f"\n\nSelf-correction (ONE attempt; a second failure of {op.tool} hands the task to a human). "
+                f"{how}\nValid parameters for {op.tool}:\n{self._param_hints(op.tool)}")
+
+    def _param_hints(self, tool: str) -> str:
+        """Parameter help for a tool, taken from its own description (Args:) and JSON schema."""
+        tool_def = getattr(self, "_tool_defs", {}).get(tool, {})
+        schema = tool_def.get("input_schema") or {}
+        required = set(schema.get("required") or [])
+        summary = "; ".join(f"{n} ({p.get('type', 'any')}, {'required' if n in required else 'optional'})"
+                            for n, p in (schema.get("properties") or {}).items()) or "(none)"
+        m = re.search(r"(?ms)^\s*Args:\s*\n(.*?)(?:\n\s*\n|\Z)", tool_def.get("description") or "")
+        return summary + ("\n" + m.group(1).rstrip() if m else "")
 
     def _escalate(self, state: ExecutionState, reason: str, last_text: str,
                   trigger: Operation | None = None) -> RunResult:
@@ -227,14 +279,19 @@ class Orchestrator:
             error_snapshot=None if trigger is None else {
                 "step": trigger.step, "tool": trigger.tool, "arguments": trigger.arguments,
                 "error_code": trigger.error_code, "error_message": trigger.error_message,
-                "retryable": trigger.retryable, "consecutive_failures": state.consecutive_failures},
+                "retryable": trigger.retryable, "recovery": trigger.recovery,
+                "consecutive_failures": state.consecutive_failures,
+                "consecutive_retryable": state.consecutive_retryable},
             current_state={
                 "steps_taken": state.steps,
                 "consecutive_failures": state.consecutive_failures,
+                "consecutive_retryable": state.consecutive_retryable,
+                "agent_failures": dict(state.agent_failures),
                 "completed_operations": [{"tool": o.tool, "arguments": o.arguments, "result": o.result}
                                          for o in state.completed],
                 "failed_operations": [{"tool": o.tool, "error_code": o.error_code,
-                                       "retryable": o.retryable, "error_message": o.error_message}
+                                       "retryable": o.retryable, "recovery": o.recovery,
+                                       "error_message": o.error_message}
                                        for o in state.failed],
                 "skipped_operations": state.skipped,
             },
@@ -243,7 +300,7 @@ class Orchestrator:
                     "ok": o.ok,
                     "result": o.result if o.ok else {"error_code": o.error_code,
                                                      "error_message": o.error_message,
-                                                     "retryable": o.retryable}}
+                                                     "retryable": o.retryable, "recovery": o.recovery}}
                    for o in state.operations],
             decision_log=list(state.log),
         )

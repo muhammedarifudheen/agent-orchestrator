@@ -71,13 +71,13 @@ def search_flights(origin: str, destination: str, date: str) -> list[dict]:
     _check_outage("search_flights")
     origin, destination = origin.strip().upper(), destination.strip().upper()
     if not (_IATA.match(origin) and _IATA.match(destination)):
-        raise ToolFailure("INVALID_AIRPORT", "Use 3-letter IATA codes, e.g. DEL, BOM.", retryable=False)
+        raise ToolFailure("INVALID_AIRPORT", "Use 3-letter IATA codes, e.g. DEL, BOM.", retryable=False, recovery="agent")
     try:
         day = _date.fromisoformat(date)
     except ValueError:
-        raise ToolFailure("INVALID_DATE", f"'{date}' is not YYYY-MM-DD.", retryable=False) from None
+        raise ToolFailure("INVALID_DATE", f"'{date}' is not YYYY-MM-DD.", retryable=False, recovery="agent") from None
     if day < _date.today():
-        raise ToolFailure("INVALID_DATE", f"{date} is in the past.", retryable=False)
+        raise ToolFailure("INVALID_DATE", f"{date} is in the past.", retryable=False, recovery="agent")
 
     # TODO(real-api): call the flight search API here; map its response to the same fields.
     flights = _MOCK_ROUTES.get((origin, destination), [])
@@ -114,26 +114,26 @@ def book_flight(flight_id: str, passenger_name: str, passenger_email: str) -> di
     """
     _check_outage("book_flight")
     if not passenger_name.strip() or not _EMAIL.match(passenger_email):
-        raise ToolFailure("INVALID_PASSENGER", "A full passenger name and a valid email are required.", retryable=False)
+        raise ToolFailure("INVALID_PASSENGER", "A full passenger name and a valid email are required.", retryable=False, recovery="agent")
     try:
         flight_number, route, day = flight_id.split("_")
     except ValueError:
-        raise ToolFailure("FLIGHT_NOT_FOUND", f"Malformed flight_id '{flight_id}'.", retryable=False) from None
+        raise ToolFailure("FLIGHT_NOT_FOUND", f"Malformed flight_id '{flight_id}'.", retryable=False, recovery="agent") from None
 
     try:  # the date embedded in flight_id was never validated: past/garbage dates were bookable
         if _date.fromisoformat(day) < _date.today():
             raise ValueError(day)
     except ValueError:
         raise ToolFailure("FLIGHT_NOT_FOUND", f"flight_id '{flight_id}' has an invalid or past date.",
-                          retryable=False) from None
+                          retryable=False, recovery="agent") from None
 
     # TODO(real-api): re-check live availability, create the PNR, take payment.
     flight = next((f for (o, d), fl in _MOCK_ROUTES.items() if o + d == route
                    for f in fl if f["flight_number"] == flight_number), None)
     if flight is None:
-        raise ToolFailure("FLIGHT_NOT_FOUND", f"No flight matches '{flight_id}'.", retryable=False)
+        raise ToolFailure("FLIGHT_NOT_FOUND", f"No flight matches '{flight_id}'.", retryable=False, recovery="agent")
     if flight["seats_available"] <= 0:
-        raise ToolFailure("SOLD_OUT", f"{flight_number} on {day} has no seats left.", retryable=False)
+        raise ToolFailure("SOLD_OUT", f"{flight_number} on {day} has no seats left.", retryable=False, recovery="agent")
 
     ref = "BK" + uuid.uuid4().hex[:6].upper()
     _BOOKINGS[ref] = {
@@ -166,9 +166,9 @@ def send_confirmation(email: str, booking_ref: str, details: str) -> bool:
     """
     _check_outage("send_confirmation")
     if not _EMAIL.match(email):
-        raise ToolFailure("INVALID_EMAIL", f"'{email}' is not a valid email address.", retryable=False)
+        raise ToolFailure("INVALID_EMAIL", f"'{email}' is not a valid email address.", retryable=False, recovery="agent")
     if booking_ref not in _BOOKINGS:
-        raise ToolFailure("BOOKING_NOT_FOUND", f"Unknown booking_ref '{booking_ref}'.", retryable=False)
+        raise ToolFailure("BOOKING_NOT_FOUND", f"Unknown booking_ref '{booking_ref}'.", retryable=False, recovery="agent")
     # TODO(real-api): send via the email/SMS provider (SES, SendGrid, ...).
     return True
 

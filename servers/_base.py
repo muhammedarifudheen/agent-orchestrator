@@ -10,7 +10,7 @@
 
 Contents: the ToolFailure contract, the tool-registration decorator (MCP registration + error
 guard + safety annotations in one place), the auth-from-env helper, outage simulation, and the
-standard HTTP-status -> (error code, retryable) recovery mapping.
+standard HTTP-status -> (error code, retryable, recovery) mapping.
 """
 from __future__ import annotations
 
@@ -78,10 +78,11 @@ def outage_active(env_var: str, tool: str, modes: dict[str, set[str] | None]) ->
 
 
 def check_outage(env_var: str, tool: str, modes: dict[str, set[str] | None], *, code: str,
-                 message: str, retryable: bool = True) -> None:
+                 message: str, retryable: bool = True, recovery: str = "agent") -> None:
     """Raise ToolFailure(code, ...) when a simulated outage covers ``tool`` (see outage_active)."""
     if outage_active(env_var, tool, modes):
-        raise ToolFailure(code, f"{message} (simulated: {os.environ.get(env_var)}).", retryable=retryable)
+        raise ToolFailure(code, f"{message} (simulated: {os.environ.get(env_var)}).",
+                          retryable=retryable, recovery=recovery)
 
 
 # -- auth from environment ---------------------------------------------------------------------
@@ -97,7 +98,8 @@ class AuthMaterial:
 def _env(name: str) -> str:
     value = os.environ.get(name)
     if not value:
-        raise ToolFailure("AUTH_NOT_CONFIGURED", f"Environment variable {name} is not set.", retryable=False)
+        raise ToolFailure("AUTH_NOT_CONFIGURED", f"Environment variable {name} is not set.", retryable=False,
+                          recovery="human")
     return value
 
 
@@ -121,34 +123,36 @@ def auth_from_env(auth: dict[str, Any] | None) -> AuthMaterial:
     if kind == "basic":
         raw = f"{_env(auth['user_env'])}:{_env(auth['password_env'])}".encode()
         return AuthMaterial(headers={"Authorization": "Basic " + base64.b64encode(raw).decode()})
-    raise ToolFailure("AUTH_NOT_CONFIGURED", f"Unsupported auth kind '{kind}'.", retryable=False)
+    raise ToolFailure("AUTH_NOT_CONFIGURED", f"Unsupported auth kind '{kind}'.", retryable=False,
+                      recovery="human")
 
 
 # -- standard error code -> recovery mapping ---------------------------------------------------
 
-_STANDARD_4XX: dict[int, tuple[str, bool]] = {
-    400: ("INVALID_REQUEST", False),
-    401: ("AUTH_FAILED", False),
-    403: ("FORBIDDEN", False),
-    404: ("NOT_FOUND", False),
-    408: ("TIMEOUT", True),
-    409: ("CONFLICT", False),
-    422: ("INVALID_REQUEST", False),
-    429: ("RATE_LIMITED", True),  # rejected before processing: always safe to retry later
+# status -> (code, retryable, recovery)
+_STANDARD_4XX: dict[int, tuple[str, bool, str]] = {
+    400: ("INVALID_REQUEST", False, "agent"),   # the agent can fix its arguments
+    401: ("AUTH_FAILED", False, "human"),       # credentials are not the agent's to fix
+    403: ("FORBIDDEN", False, "human"),
+    404: ("NOT_FOUND", False, "agent"),         # likely a wrong id; the agent can look it up again
+    408: ("TIMEOUT", True, "agent"),
+    409: ("CONFLICT", False, "human"),          # state conflict: retrying could duplicate a side effect
+    422: ("INVALID_REQUEST", False, "agent"),
+    429: ("RATE_LIMITED", True, "agent"),       # rejected before processing: safe to retry later
 }
 
 
-def standard_http_error(status: int, idempotent: bool) -> tuple[str, bool]:
-    """Default (code, retryable) for an HTTP error status when a spec gives no explicit mapping.
+def standard_http_error(status: int, idempotent: bool) -> tuple[str, bool, str]:
+    """Default (code, retryable, recovery) for an HTTP error status without an explicit mapping.
 
-    4xx are the caller's fault (not retryable) except 408/429. 5xx are retryable only for
-    idempotent operations: for a write/money call a 5xx leaves the outcome uncertain.
+    4xx are the caller's fault (not retryable) except 408/429. 5xx are retryable, and left to the
+    agent, only for idempotent operations: for a write/money call a 5xx leaves the outcome
+    uncertain, so it goes to a human.
     """
     if status in _STANDARD_4XX:
-        code, retryable = _STANDARD_4XX[status]
-        return code, retryable if status in (408, 429) else False
+        return _STANDARD_4XX[status]
     if 500 <= status <= 599:
-        return "SERVICE_UNAVAILABLE", idempotent
+        return "SERVICE_UNAVAILABLE", idempotent, "agent" if idempotent else "human"
     if 400 <= status <= 499:
-        return "REQUEST_REJECTED", False
-    return "UNEXPECTED_RESPONSE", False
+        return "REQUEST_REJECTED", False, "human"
+    return "UNEXPECTED_RESPONSE", False, "human"
