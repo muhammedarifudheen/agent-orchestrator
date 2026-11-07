@@ -157,11 +157,12 @@ header + spec hash; CI regenerates and diffs) so registry discovery, `mcp dev`, 
 unchanged. Rejected alternative: one runtime-interpreting server, since dynamic signatures lose
 the type-hint-derived schemas and make diffs unreviewable.
 
-**Known contract defect this exposes (fix before generating write tools):** `@guarded` currently maps
-`TimeoutError` to `TIMEOUT retryable=true` for every tool. For a non-idempotent `write`/`money`
-operation a timeout is an UNKNOWN OUTCOME, and telling the agent to retry invites a double charge.
-The generator must emit timeout handling from `idempotent`: idempotent -> `TIMEOUT retryable=true`;
-otherwise -> `OUTCOME_UNKNOWN retryable=false` (forces a human handoff / state check).
+**Contract defect this exposed - FIXED (da57843, extended in 8c53a30):** `@guarded` used to map every
+`TimeoutError` to `TIMEOUT retryable=true`. For a non-idempotent `write`/`money` operation a timeout is
+an UNKNOWN OUTCOME, and telling the agent to retry invites a double charge. Now: idempotent ->
+`TIMEOUT retryable=true recovery=agent`; otherwise -> `OUTCOME_UNKNOWN retryable=false recovery=human`.
+The generated HTTP runtime applies the same rule (read timeout vs connect timeout vs 5xx), covered by
+`tests/test_generator.py`.
 
 ### 3. Learning loop: what "study a system" can honestly mean
 
