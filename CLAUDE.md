@@ -59,6 +59,25 @@ implemented them. Change them here first, then in code.
 - D5. The `<user_id>` in the handoff filename is `Orchestrator(user_id=...)`, defaulting to the OS
   username (sanitized). Pass the real end-user id from the calling application.
 
+### Recorded decisions (generator)
+- D6. The spec format keeps the field names in `specs/schema.json` rather than the shorter names in
+  the genericity-engine brief (`auth.kind/env` not `auth{type, env_var}`; `request.method/path` and
+  `params[].in` not flat `method/path`; `response{type,select,description}` not `response_shape`;
+  `errors[]`/`error_map[]` with `{when, code, retryable, recovery}` not `error_codes[]{code, recovery}`).
+  Same information, a superset; renaming would have broken the working generator and its tests.
+- D7. `servers/__init__.py` puts `servers/` on `sys.path`, so both `python -c "import servers.<name>_server"`
+  and script launch (`python servers/<name>_server.py`, how the registry and `mcp dev` start servers)
+  work. `tests/test_import.py` asserts both for every server.
+- D8. Specs are read-only unless a human has reviewed the safety fields. `jsonplaceholder.yaml` is
+  deliberately read-only: its API fakes writes, but the fail-closed rule (`review.safety_fields:
+  reviewed`) must be signed by a person, and an agent must not self-approve one.
+- D9. `tests/test_contract.py` assertions are identical for every server. Per-server data is only the
+  probes. Two asymmetries are stated, not hidden: (a) the end-to-end "raw exception becomes
+  INTERNAL_ERROR" check runs only for generated servers (their HTTP layer is injectable); hand-written
+  ones get the structural check that every tool is wrapped by `@guarded`; (b) retail has no outage probe.
+- D10. A spec's mocked-only behaviour is allowed but must be labelled in the YAML (e.g. the
+  `list_comments_for_post` 404 rule: the real API returns 200 `[]`).
+
 ## Architecture: genericity
 
 Goal: a pipeline that turns ANY reachable system into tools with the same contract, without a
@@ -269,7 +288,7 @@ Built and tested:
   + `tests/test_<name>.py`. Refuses to generate non-read operations unless `idempotent` is stated and
   `review.safety_fields: reviewed`. `--check` detects stale generated files.
 - `tests/test_contract.py`: ONE contract test, run identically against travel, retail, banking
-  (hand-written) and weather (generated). Mutation-checked: 5 deliberate contract breaks are each caught.
+  (hand-written) and weather + jsonplaceholder (generated, two APIs with different response shapes). Mutation-checked: 5 deliberate contract breaks are each caught.
 - `agent/tool_registry.py: parse_error` normalizes SDK argument-validation errors to
   `INVALID_ARGUMENTS retryable=false`.
 
@@ -342,6 +361,8 @@ set LIVE_TESTS=1 & python -m pytest tests/test_weather.py   # also call the real
 | banking | `transfer_funds(from_acct, to_acct, amount)` | moves money | NOT idempotent: after a timeout, check balances before retrying |
 | weather (generated, real API) | `get_current_weather(latitude, longitude)` | none | Open-Meteo, no key |
 | weather (generated, real API) | `get_daily_forecast(latitude, longitude, days=3)` | none | Open-Meteo, no key |
+| jsonplaceholder (generated, real API) | `get_post(post_id)`, `get_user(user_id)` | none | object / nested object responses |
+| jsonplaceholder (generated, real API) | `list_posts_by_user(user_id)`, `list_comments_for_post(post_id)` | none | array responses; unknown id = empty list, not an error |
 
 Outage simulation env vars: `TRAVEL_FAIL_MODE`, `RETAIL_FAIL_MODE=payment_down`, `BANKING_FAIL_MODE=core_down`.
 

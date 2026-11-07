@@ -48,11 +48,13 @@ def _rule_matches(when: dict[str, Any], status: int, body: Any) -> bool:
 
 
 def _body_message(body: Any, text: str) -> str:
+    """Human-readable detail from an error body; empty when the body carries no message ({} etc.)."""
     if isinstance(body, dict):
         for key in ("reason", "message", "error_description", "detail", "error"):
             if isinstance(body.get(key), str) and body[key]:
                 return body[key][:300]
-    return text.strip()[:300]
+        return ""
+    return "" if body is not None else text.strip()[:300]
 
 
 class HttpClient:
@@ -160,8 +162,9 @@ class HttpClient:
         for rule in list(op.get("errors") or []) + list(self.system.get("error_map") or []):
             if _rule_matches(rule["when"], status, body):
                 meaning = rule.get("meaning")
-                msg = f"{meaning} ({detail})" if meaning and detail else (meaning or detail)
+                msg = f"{meaning} ({detail})" if meaning and detail else (meaning or detail or "no details in response")
                 return ToolFailure(rule["code"], f"HTTP {status}: {msg}", retryable=rule["retryable"],
                                    recovery=rule["recovery"])
         code, retryable, recovery = standard_http_error(status, idempotent)
-        return ToolFailure(code, f"HTTP {status}: {detail}", retryable=retryable, recovery=recovery)
+        return ToolFailure(code, f"HTTP {status}: {detail or 'no details in response'}",
+                           retryable=retryable, recovery=recovery)
