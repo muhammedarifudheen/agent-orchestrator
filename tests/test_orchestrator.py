@@ -48,30 +48,46 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 result = await orch.run("book a flight")
                 return result, list(Path(d).glob("*.json"))
 
-    async def test_happy_path_with_recovery(self):
+    async def test_happy_path(self):
         turns = [
             [use("1", "travel__search_flights", origin="DEL", destination="BOM", date=TOMORROW)],
-            # first attempt hits a sold-out flight -> error fed back -> model falls back to another
-            [use("2", "travel__book_flight", flight_id=f"UK-995_DELBOM_{TOMORROW}",
-                 passenger_name="A B", passenger_email="a@b.co")],
-            [use("3", "travel__book_flight", flight_id=f"AI-865_DELBOM_{TOMORROW}",
+            [use("2", "travel__book_flight", flight_id=f"AI-865_DELBOM_{TOMORROW}",
                  passenger_name="A B", passenger_email="a@b.co")],
             [say("Booked.")],
         ]
         result, files = await self._run(turns)
         self.assertTrue(result.success)
-        self.assertEqual([o.error_code for o in result.state.failed], ["SOLD_OUT"])
+        self.assertEqual(result.state.failed, [])
         self.assertEqual(files, [])
 
-    async def test_handoff_on_consecutive_failures(self):
-        bad = lambda i: [use(i, "travel__book_flight", flight_id="XX_DELBOM_2030-01-01",
-                             passenger_name="A", passenger_email="a@b.co")]
-        result, files = await self._run([bad("1"), bad("2"), bad("3")])
+    async def test_non_retryable_sold_out_hands_off_without_trying_another_flight(self):
+        # SOLD_OUT is retryable=false: policy is an immediate human handoff, no fallback booking
+        turns = [
+            [use("1", "travel__book_flight", flight_id=f"UK-995_DELBOM_{TOMORROW}",
+                 passenger_name="A B", passenger_email="a@b.co")],
+            [use("2", "travel__book_flight", flight_id=f"AI-865_DELBOM_{TOMORROW}",
+                 passenger_name="A B", passenger_email="a@b.co")],
+        ]
+        result, files = await self._run(turns)
+        self.assertFalse(result.success)
+        self.assertEqual(len(result.handoff.attempted_operations), 1)
+        self.assertEqual(result.handoff.error_snapshot["error_code"], "SOLD_OUT")
+        self.assertIs(result.handoff.error_snapshot["retryable"], False)
+        self.assertEqual(len(files), 1)
+
+    async def test_handoff_on_consecutive_retryable_failures(self):
+        os.environ["TRAVEL_FAIL_MODE"] = "search_down"  # SERVICE_UNAVAILABLE, retryable=true
+        try:
+            search = lambda i: [use(i, "travel__search_flights", origin="DEL", destination="BOM",
+                                    date=TOMORROW)]
+            result, files = await self._run([search("1"), search("2"), search("3")])
+        finally:
+            del os.environ["TRAVEL_FAIL_MODE"]
         self.assertFalse(result.success)
         h = result.handoff
-        self.assertEqual(len(h.attempted_operations), 3)
-        self.assertEqual(h.error_codes, ["FLIGHT_NOT_FOUND"])
-        self.assertIn("consecutive", h.reason)
+        self.assertEqual(len(h.attempted_operations), 2)  # stops at the 2nd, never reaches a 3rd
+        self.assertEqual(h.error_codes, ["SERVICE_UNAVAILABLE"])
+        self.assertIn("2 consecutive", h.reason)
         self.assertEqual(len(files), 1)  # snapshot persisted
 
     async def test_handoff_preserves_completed_side_effects(self):

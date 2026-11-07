@@ -14,6 +14,9 @@ from agent.tool_registry import ToolOutcome  # noqa: E402
 from servers.errors import ToolFailure, guarded  # noqa: E402
 
 OK = ToolOutcome(True, "t__op", data={"booking_ref": "BK1"})
+FATAL = ToolOutcome(False, "t__op", error_code="CARD_DECLINED", error_message="declined",
+                    retryable=False)
+UNKNOWN = ToolOutcome(False, "t__op", error_code="TOOL_ERROR", error_message="?", retryable=None)
 BAD = ToolOutcome(False, "t__op", error_code="SERVICE_UNAVAILABLE",
                   error_message="down", retryable=True)
 
@@ -54,20 +57,38 @@ async def run(outcomes, **kw):
 
 class FailureCounterTests(unittest.IsolatedAsyncioTestCase):
     async def test_failures_increment_counter_and_trigger_handoff(self):
-        result = await run([OK, BAD, BAD, BAD])
-        self.assertEqual(result.state.consecutive_failures, 3)
+        # default threshold is 2: the first retryable failure is tolerated, the second hands off
+        result = await run([OK, BAD, BAD, OK])  # the trailing OK must never be consumed
+        self.assertEqual(result.state.consecutive_failures, 2)
         self.assertFalse(result.success)
         h = result.handoff
-        self.assertIn("3 consecutive", h.reason)
+        self.assertIn("2 consecutive", h.reason)
         self.assertEqual(h.error_codes, ["SERVICE_UNAVAILABLE"])
-        self.assertEqual(len(h.attempted_operations), 4)
+        self.assertEqual(len(h.attempted_operations), 3)  # stopped right after the 2nd failure
         self.assertIs(h.attempted_operations[-1]["retryable"], True)
         self.assertEqual(len(h.current_state["completed_operations"]), 1)  # the earlier success
-        self.assertEqual(h.current_state["consecutive_failures"], 3)
+        self.assertEqual(h.current_state["consecutive_failures"], 2)
+
+    async def test_single_retryable_failure_does_not_hand_off(self):
+        result = await run([BAD, OK])
+        self.assertTrue(result.success)
+        self.assertEqual(result.state.consecutive_failures, 0)
+
+    async def test_non_retryable_failure_hands_off_immediately(self):
+        result = await run([OK, FATAL, OK])
+        self.assertFalse(result.success)
+        self.assertEqual(result.state.consecutive_failures, 1)  # counter alone would not fire
+        self.assertIn("Non-retryable", result.handoff.reason)
+        self.assertEqual(len(result.handoff.attempted_operations), 2)
+        self.assertEqual(result.handoff.error_snapshot["error_code"], "CARD_DECLINED")
+
+    async def test_unknown_retryability_alone_does_not_hand_off(self):
+        result = await run([UNKNOWN, OK])  # contract violation (retryable=None) is not "false"
+        self.assertTrue(result.success)
 
     async def test_success_resets_counter_so_no_handoff(self):
-        # fail, fail, OK would have been the 3rd failure without the reset
-        result = await run([BAD, BAD, OK, BAD, BAD, OK])
+        # fail, OK, fail, OK: each failure would be the 2nd consecutive one without the reset
+        result = await run([BAD, OK, BAD, OK])
         self.assertTrue(result.success)
         self.assertIsNone(result.handoff)
         self.assertEqual(result.state.consecutive_failures, 0)

@@ -29,10 +29,13 @@ by adding MCP servers only — never by changing the Agent layer.
   Domain-free system prompt, domain-free code.
 - **Exception routing layer** — failures are never swallowed. Each failed call is fed back to
   Claude (so it can retry with other args or pick another tool) AND recorded in `ExecutionState`.
-  When recovery is exhausted (consecutive-failure limit, step limit, or LLM/API failure) the
-  orchestrator emits a `Handoff`: goal, every attempted operation, error codes, current state
-  (what already succeeded — e.g. a booking that must not be repeated), and a reason.
-  It is printed and saved to `handoffs/` for a human.
+  A handoff fires after any tool call that fails with `retryable=false`, or when
+  `consecutive_failures >= 2` (any success resets the counter). The run stops at once: remaining
+  calls of that turn are skipped (recorded, not executed) and the LLM is not called again. The
+  handoff also fires on step-limit or LLM/API failure. It writes
+  `handoffs/YYYYMMDD_HHMMSS_<user>.json` with: goal, user, reason, `error_snapshot` (the triggering
+  failure), `steps` (thought, tool, args, result per call), `current_state` (what already succeeded
+  - e.g. an order that must not be created twice - plus skipped calls), and the text decision log.
 
 ## Rules
 
