@@ -52,8 +52,9 @@ def write_spec(tmp_path: Path, spec: dict) -> Path:
 
 # -- generator -----------------------------------------------------------------------------------
 
-def test_committed_weather_files_are_up_to_date():
-    assert generate(WEATHER, ROOT / "servers", ROOT / "tests", check=True) == []
+@pytest.mark.parametrize("spec", sorted((ROOT / "specs").glob("*.yaml")), ids=lambda p: p.stem)
+def test_committed_generated_files_are_up_to_date(spec):
+    assert generate(spec, ROOT / "servers", ROOT / "tests", check=True) == []
 
 
 def test_unknown_spec_keys_are_rejected(tmp_path):

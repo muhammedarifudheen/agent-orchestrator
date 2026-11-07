@@ -8,10 +8,10 @@ Targets:
   * hand-written: travel, retail, banking  (probes listed here)
   * generated:    every specs/*.yaml       (probes come from the spec's `examples`)
 
-Known limits (stated, not hidden): the "raw exception becomes INTERNAL_ERROR" behaviour is exercised
-end to end only for generated servers (their HTTP layer is injectable); for hand-written servers the
-test asserts every tool is wrapped by `@guarded`, whose behaviour is unit-tested in
-test_failure_routing.py.
+Raw exceptions: every server, hand-written or generated, is tested end to end for "an unexpected
+RuntimeError inside a tool body reaches the client as INTERNAL_ERROR, not a traceback". Generated
+servers are crashed through their injectable HTTP transport; hand-written ones through a named
+helper their tools call (`Target.crash`). Same assertions, same shared wrapper (`@guarded`).
 """
 from __future__ import annotations
 
@@ -41,6 +41,7 @@ class Target:
     module: str
     probes: list[dict[str, Any]]
     outage: dict[str, Any] | None = None  # {"env": {..}, "tool", "args", "code"} or {"mock":..}
+    crash: dict[str, Any] | None = None  # hand-written only: {"patch": helper name, "tool", "args"}
     generated: bool = False
     ids: list[str] = field(default_factory=list)
 
@@ -62,14 +63,16 @@ HAND_WRITTEN = [
         probe("send_confirmation", {"email": "nope", "booking_ref": "BK1", "details": "d"}, fail("INVALID_EMAIL", False, "agent")),
     ], outage={"env": {"TRAVEL_FAIL_MODE": "all_down"}, "tool": "search_flights",
                "args": {"origin": "DEL", "destination": "BOM", "date": TOMORROW}, "code": "SERVICE_UNAVAILABLE",
-               "recovery": "agent"}),
+               "recovery": "agent"},
+           crash={"patch": "_check_outage", "tool": "search_flights",
+                  "args": {"origin": "DEL", "destination": "BOM", "date": TOMORROW}}),
     Target("retail", "retail_server", [
         probe("check_inventory", {"sku": "SKU-1001", "qty": 1}),
         probe("check_inventory", {"sku": "SKU-NOPE", "qty": 1}, fail("SKU_NOT_FOUND", False, "agent")),
         probe("create_order", {"sku": "SKU-1001", "qty": 0, "customer_id": "C-1001"}, fail("INVALID_QUANTITY", False, "agent")),
         probe("charge_payment", {"order_id": "ORD-NOPE", "amount": 1.0}, fail("ORDER_NOT_FOUND", False, "agent")),
         probe("create_shipment", {"order_id": "ORD-NOPE", "address": "12 MG Road, Pune 411001"}, fail("ORDER_NOT_FOUND", False, "agent")),
-    ]),
+    ], crash={"patch": "_get_sku", "tool": "check_inventory", "args": {"sku": "SKU-1001", "qty": 1}}),
     Target("banking", "banking_server", [
         probe("verify_kyc", {"customer_id": "CUST-TEST-0001"}),
         probe("verify_kyc", {"customer_id": "CUST-NOPE"}, fail("CUSTOMER_NOT_FOUND", False, "agent")),
@@ -81,7 +84,8 @@ HAND_WRITTEN = [
         probe("transfer_funds", {"from_acct": "ACCT-TEST-0002", "to_acct": "ACCT-TEST-0001", "amount": 1.0},
               fail("ACCOUNT_FROZEN", False, "human")),  # a business refusal: a person must decide
     ], outage={"env": {"BANKING_FAIL_MODE": "core_down"}, "tool": "get_account_balance",
-               "args": {"account_id": "ACCT-TEST-0001"}, "code": "CORE_BANKING_UNAVAILABLE", "recovery": "agent"}),
+               "args": {"account_id": "ACCT-TEST-0001"}, "code": "CORE_BANKING_UNAVAILABLE", "recovery": "agent"},
+           crash={"patch": "_check_outage", "tool": "get_account_balance", "args": {"account_id": "ACCT-TEST-0001"}}),
 ]
 
 
@@ -239,15 +243,27 @@ async def test_outage_is_a_retryable_failure(target, monkeypatch):
 
 
 async def test_unexpected_exception_becomes_internal_error(target, monkeypatch):
-    if not target.generated:
-        pytest.skip("hand-written servers: wrapping asserted by test_every_tool_is_wrapped_by_guarded")
+    """A raw RuntimeError inside a tool body must reach the client as INTERNAL_ERROR (human), never a traceback."""
     module = load(target)
-    ok = next(p for p in target.probes if p["expect"] == "ok")
+    if target.generated:
+        ok = next(p for p in target.probes if p["expect"] == "ok")
+        tool, args = ok["tool"], ok["args"]
 
-    def boom(request: httpx.Request) -> httpx.Response:
-        raise RuntimeError("kaboom")
+        def boom_transport(request: httpx.Request) -> httpx.Response:
+            raise RuntimeError("kaboom")
 
-    monkeypatch.setattr(module._client, "transport", httpx.MockTransport(boom))
-    result = await run(module, ok["tool"], ok["args"])
-    assert result.is_error
-    assert parse_error(text_of(result))[:3] == ("INTERNAL_ERROR", False, "human")
+        monkeypatch.setattr(module._client, "transport", httpx.MockTransport(boom_transport))
+    else:
+        assert target.crash, f"{target.name}: hand-written targets must declare a crash hook (no skipping)"
+        tool, args = target.crash["tool"], target.crash["args"]
+
+        def boom(*_a, **_k):
+            raise RuntimeError("kaboom")
+
+        monkeypatch.setattr(module, target.crash["patch"], boom)  # the tool body calls this helper
+    result = await run(module, tool, args)
+    text = text_of(result)
+    assert result.is_error, text
+    assert parse_error(text)[:3] == ("INTERNAL_ERROR", False, "human"), text
+    assert ERROR_FORMAT.search(text), text
+    assert "Traceback" not in text and 'File "' not in text, text

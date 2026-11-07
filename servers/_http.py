@@ -114,6 +114,10 @@ class HttpClient:
 
     def call(self, op_name: str, args: dict[str, Any]) -> Any:
         op = self.operations[op_name]
+        if self.system.get("read_only") and (op["method"] not in ("GET", "HEAD") or op["side_effect"] != "read"):
+            raise ToolFailure("READ_ONLY_VIOLATION",
+                              f"{op_name} would write to a system declared read_only; nothing was sent.",
+                              retryable=False, recovery="human")
         idempotent = bool(op.get("idempotent", op["side_effect"] == "read"))
         self._validate(op, args)
         url, query, headers, body = self._build(op, args)

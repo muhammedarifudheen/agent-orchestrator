@@ -68,15 +68,22 @@ implemented them. Change them here first, then in code.
 - D7. `servers/__init__.py` puts `servers/` on `sys.path`, so both `python -c "import servers.<name>_server"`
   and script launch (`python servers/<name>_server.py`, how the registry and `mcp dev` start servers)
   work. `tests/test_import.py` asserts both for every server.
-- D8. Specs are read-only unless a human has reviewed the safety fields. `jsonplaceholder.yaml` is
-  deliberately read-only: its API fakes writes, but the fail-closed rule (`review.safety_fields:
-  reviewed`) must be signed by a person, and an agent must not self-approve one.
-- D9. `tests/test_contract.py` assertions are identical for every server. Per-server data is only the
-  probes. Two asymmetries are stated, not hidden: (a) the end-to-end "raw exception becomes
-  INTERNAL_ERROR" check runs only for generated servers (their HTTP layer is injectable); hand-written
-  ones get the structural check that every tool is wrapped by `@guarded`; (b) retail has no outage probe.
+- D8. Specs are read-only unless a human has reviewed the safety fields, and `read_only: true` is
+  ENFORCED, not promised: `jsonplaceholder.yaml` declares it; the generator refuses any non-GET or
+  non-read operation in a `read_only` spec (even a reviewed one); the generated server carries the
+  marker in `SYSTEM`; and the HTTP runtime refuses to send a non-GET/HEAD request (`READ_ONLY_VIOLATION`,
+  recovery=human) even if the operations table is edited. `tests/test_read_only.py` asserts each layer
+  and was mutation-checked. Its API fakes writes, but an agent must not self-approve a write's safety review.
+- D9. `tests/test_contract.py` is ONE file; its assertions are identical for every server (hand-written
+  and generated). Per-server data is only probes, an outage probe and a crash hook. Both hand-written
+  and generated servers are tested end to end for raw-exception -> INTERNAL_ERROR; the wrapper is
+  shared (`@guarded`). The one remaining per-server skip is stated: retail has no outage probe.
 - D10. A spec's mocked-only behaviour is allowed but must be labelled in the YAML (e.g. the
   `list_comments_for_post` 404 rule: the real API returns 200 `[]`).
+- D11. Raw-exception -> `INTERNAL_ERROR retryable=false recovery=human` is wrapper-level (`@guarded` in
+  `servers/errors.py`, applied by `make_tool`). It is tested for ALL servers: hand-written ones are
+  crashed through a helper their tool body calls (`Target.crash`), generated ones through the injected
+  HTTP transport. The client must see the contract text, never a traceback or a source path.
 
 ## Architecture: genericity
 

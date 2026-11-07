@@ -7,6 +7,9 @@ description: Fake blog REST API (posts, comments, users) from JSONPlaceholder, f
 base_url: https://jsonplaceholder.typicode.com
 base_url_env: JSONPLACEHOLDER_BASE_URL
 timeout_s: 10
+# ENFORCED, not a promise: the generator refuses any write operation in this spec and the HTTP runtime
+# refuses to send a non-GET request. A person must review safety fields before a write op may exist here.
+read_only: true
 auth: {kind: none}
 error_map:
   - {when: {status: 429}, code: RATE_LIMITED, retryable: true, recovery: agent, meaning: "Rate limit reached; retry later"}
