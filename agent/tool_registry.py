@@ -1,0 +1,123 @@
+"""Discovers and connects all MCP servers; exposes their tools to the LLM.
+
+Industry-agnostic: any ``servers/*_server.py`` is spawned over stdio, its tools are listed and
+namespaced ``<server>__<tool>``. Every call is normalized into a ``ToolOutcome`` — a failure is
+returned as data (never raised, never swallowed) so the orchestrator can route it.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+import time
+from contextlib import AsyncExitStack
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from mcp import ClientSession
+from mcp.client.stdio import StdioServerParameters, stdio_client
+
+SEP = "__"
+# Server error contract (servers/errors.py): "[CODE] retryable=<true|false> message"
+_CODE = re.compile(
+    r"^\s*(?:Error executing tool \S+:\s*)?\[([A-Z][A-Z0-9_]*)\]\s+retryable=(true|false)\s*(.*)", re.S
+)
+
+
+@dataclass
+class ToolOutcome:
+    """Normalized result of one tool call."""
+
+    ok: bool
+    tool: str
+    data: Any = None
+    error_code: str | None = None
+    error_message: str | None = None
+    retryable: bool | None = None  # None = unknown (error did not follow the contract)
+    duration_ms: int = 0
+
+    def to_llm_text(self) -> str:
+        """Render for Claude as the tool_result content."""
+        if self.ok:
+            return json.dumps(self.data, ensure_ascii=False, default=str)
+        flag = "unknown" if self.retryable is None else str(self.retryable).lower()
+        return f"[{self.error_code}] retryable={flag} {self.error_message}"
+
+
+@dataclass
+class ToolRegistry:
+    """Owns the lifecycle of all MCP server connections. Use as ``async with``."""
+
+    servers_dir: Path
+    pattern: str = "*_server.py"
+    _stack: AsyncExitStack = field(default_factory=AsyncExitStack, init=False)
+    _sessions: dict[str, ClientSession] = field(default_factory=dict, init=False)
+    _tools: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
+    connect_errors: dict[str, str] = field(default_factory=dict, init=False)
+
+    async def __aenter__(self) -> "ToolRegistry":
+        await self._stack.__aenter__()
+        for script in sorted(self.servers_dir.glob(self.pattern)):
+            name = script.stem.removesuffix("_server")
+            try:
+                await self._connect(name, script)
+            except Exception as exc:  # one broken server must not take the others down
+                self.connect_errors[name] = f"{type(exc).__name__}: {exc}"
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> bool | None:
+        return await self._stack.__aexit__(*exc_info)
+
+    async def _connect(self, name: str, script: Path) -> None:
+        params = StdioServerParameters(
+            command=sys.executable, args=[str(script)], env=dict(os.environ)
+        )
+        read, write = await self._stack.enter_async_context(stdio_client(params))
+        session = await self._stack.enter_async_context(ClientSession(read, write))
+        await session.initialize()
+        self._sessions[name] = session
+        for tool in (await session.list_tools()).tools:
+            self._tools[f"{name}{SEP}{tool.name}"] = {
+                "name": f"{name}{SEP}{tool.name}",
+                "description": tool.description or "",
+                "input_schema": tool.input_schema,
+            }
+
+    def anthropic_tools(self) -> list[dict[str, Any]]:
+        """Tool definitions in Claude API format."""
+        return list(self._tools.values())
+
+    async def call(self, qualified_name: str, args: dict[str, Any]) -> ToolOutcome:
+        """Call a tool. Never raises: all failures come back as ``ToolOutcome(ok=False)``."""
+        start = time.monotonic()
+
+        def fail(code: str, msg: str, retryable: bool | None = None) -> ToolOutcome:
+            return ToolOutcome(False, qualified_name, error_code=code, error_message=msg,
+                               retryable=retryable, duration_ms=int((time.monotonic() - start) * 1000))
+
+        if qualified_name not in self._tools:
+            return fail("UNKNOWN_TOOL", f"No tool named '{qualified_name}'.", retryable=False)
+        server, _, tool = qualified_name.partition(SEP)
+        try:
+            result = await self._sessions[server].call_tool(tool, args)
+        except Exception as exc:  # transport/protocol failure
+            return fail("TRANSPORT_ERROR", f"{type(exc).__name__}: {exc}", retryable=True)
+
+        text = "\n".join(getattr(c, "text", "") for c in result.content).strip()
+        if result.is_error:
+            m = _CODE.match(text)
+            if m:
+                return fail(m.group(1), m.group(3), retryable=m.group(2) == "true")
+            return fail("TOOL_ERROR", text or "unknown error")  # contract violation: retryable unknown
+        data: Any = result.structured_content
+        if isinstance(data, dict) and set(data) == {"result"}:  # SDK wraps non-dict returns
+            data = data["result"]
+        if data is None:  # untyped returns (e.g. bare dict) arrive only as JSON text
+            try:
+                data = json.loads(text)
+            except ValueError:
+                data = text
+        return ToolOutcome(True, qualified_name, data=data,
+                           duration_ms=int((time.monotonic() - start) * 1000))
