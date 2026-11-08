@@ -23,7 +23,7 @@ SEP = "__"
 # Server error contract (servers/errors.py): "[CODE] retryable=<true|false> recovery=<agent|human> message"
 _CODE = re.compile(
     r"^\s*(?:Error executing tool \S+:\s*)?\[([A-Z][A-Z0-9_]*)\]\s+retryable=(true|false)"
-    r"\s+recovery=(agent|human)\s*(.*)", re.S
+    r"\s+recovery=(agent|human)\s*(?:http_status=(\d{3})\s+)?(.*)", re.S
 )
 # The SDK itself rejects bad/missing arguments before the tool runs, with pydantic text that does
 # not follow the server contract. Normalize it here so the agent always sees [CODE] retryable=...
@@ -35,13 +35,15 @@ class ParsedError(NamedTuple):
     retryable: bool | None  # None = text did not follow the contract
     recovery: str | None  # "agent" | "human" | None (unknown: callers must treat as human)
     message: str
+    http_status: int | None = None  # structured upstream HTTP status (D18); None when the failure had none
 
 
 def parse_error(text: str) -> ParsedError:
     """Parse an is_error text. Anything not following the contract keeps retryable/recovery None."""
     m = _CODE.match(text)
     if m:
-        return ParsedError(m.group(1), m.group(2) == "true", m.group(3), m.group(4))
+        return ParsedError(m.group(1), m.group(2) == "true", m.group(3), m.group(5),
+                           int(m.group(4)) if m.group(4) else None)
     if _ARG_VALIDATION.search(text):
         lines = [ln.strip() for ln in text.splitlines() if ln.strip() and "errors.pydantic.dev" not in ln]
         return ParsedError("INVALID_ARGUMENTS", False, "agent", "; ".join(lines[:6])[:400])
@@ -60,6 +62,7 @@ class ToolOutcome:
     retryable: bool | None = None  # None = unknown (error did not follow the contract)
     recovery: str | None = None  # "agent" | "human"; None = unknown, treated as human
     duration_ms: int = 0
+    http_status: int | None = None  # upstream HTTP status when the failure carried one (D18)
 
     def to_llm_text(self) -> str:
         """Render for Claude as the tool_result content."""
@@ -116,9 +119,11 @@ class ToolRegistry:
         """Call a tool. Never raises: all failures come back as ``ToolOutcome(ok=False)``."""
         start = time.monotonic()
 
-        def fail(code: str, msg: str, retryable: bool | None = None, recovery: str | None = None) -> ToolOutcome:
-            return ToolOutcome(False, qualified_name, error_code=code, error_message=msg,
-                               retryable=retryable, recovery=recovery, duration_ms=int((time.monotonic() - start) * 1000))
+        def fail(code: str, msg: str, retryable: bool | None = None, recovery: str | None = None,
+                 http_status: int | None = None) -> ToolOutcome:
+            return ToolOutcome(False, qualified_name, error_code=code, error_message=msg, retryable=retryable,
+                               recovery=recovery, duration_ms=int((time.monotonic() - start) * 1000),
+                               http_status=http_status)
 
         if qualified_name not in self._tools:
             return fail("UNKNOWN_TOOL", f"No tool named '{qualified_name}'.", retryable=False, recovery="agent")
@@ -132,7 +137,7 @@ class ToolRegistry:
         text = "\n".join(getattr(c, "text", "") for c in result.content).strip()
         if result.is_error:
             e = parse_error(text)
-            return fail(e.code, e.message, retryable=e.retryable, recovery=e.recovery)
+            return fail(e.code, e.message, retryable=e.retryable, recovery=e.recovery, http_status=e.http_status)
         data: Any = result.structured_content
         if isinstance(data, dict) and set(data) == {"result"}:  # SDK wraps non-dict returns
             data = data["result"]

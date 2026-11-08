@@ -48,7 +48,8 @@ by adding MCP servers only — never by changing the Agent layer.
 These were NOT written down when first made; this is the record, reconstructed in the turn that
 implemented them. Change them here first, then in code.
 - D1. Failure text is `[CODE] retryable=<true|false> recovery=<agent|human> message`. `recovery` is
-  mandatory on every `ToolFailure`; there is no default.
+  mandatory on every `ToolFailure`; there is no default. (Optional since D18: one `http_status=<n>` token before the
+  message when the failure came from an upstream HTTP response; absent otherwise.)
 - D2. `recovery=agent`: bad/missing/mistyped arguments, an id the agent can look up again, wrong call
   order, a transient fault worth one retry, a sold-out choice it can replace.
   `recovery=human`: business declines (card declined, insufficient funds, frozen account, KYC, limit),
@@ -154,16 +155,32 @@ implemented them. Change them here first, then in code.
   `tests/test_contract.py` plus the generated tests (`pipeline._verify`) -> promote -> verify again -> commit only
   then. Types, first match wins: `correct_param_type` (an argument-validation error plus an observed argument type that
   differs from the spec; a number param that was sent an integer is NOT an error), `add_error_code` (code not declared
-  in the operation or the spec's error_map, and the HTTP status is known; the status is read from the runtime's
-  "HTTP <status>:" message because handoffs do not store it), `mark_needs_review` (everything else). A
+  in the operation or the spec's error_map, and an HTTP status is known), `mark_needs_review` (everything else). A
   `mark_needs_review` proposal, or any patched spec that holds a `needs_review` operation, is REJECTED by apply with a
-  reason (D14: the generator refuses such specs); it can only be resolved by a person editing and reviewing the spec by
-  hand. Stale proposals (spec hash changed), non-applying diffs and path escapes are rejected; a red verification
-  leaves spec/server/tests byte-identical. Known limits: hand-written systems (travel/retail/banking) have no spec, so
-  they are reported as skipped and get no proposal; the post-promotion restore branch of apply.py has no test (a red
-  second verify cannot be produced naturally, because both verifies run the same spec and generator); the
-  `add_error_code` meaning text is a placeholder for the reviewer to reword. `MIN_RECURRENCE` and
-  `CONFIDENCE_THRESHOLD` change only by a decision recorded here.
+  reason (D14: the generator refuses such specs). It is not a silent flag: propose.py also writes
+  `<proposal>.action.md` beside it with the operation, the error signature, the current spec lines and the two likely
+  corrections (a param type, or the error code) with concrete spec paths and line numbers; a person then edits the spec
+  by hand. Stale proposals (spec hash changed), non-applying diffs and path escapes are rejected; a red verification
+  leaves spec/server/tests byte-identical. `MIN_RECURRENCE` and `CONFIDENCE_THRESHOLD` change only by a decision
+  recorded here.
+  HTTP status: `ToolFailure(..., http_status=N)` is optional structured data. On the wire
+  it is one extra token (`[CODE] retryable=.. recovery=.. http_status=404 message`), `parse_error` strips it from the
+  message, the orchestrator stores it as `http_status` in the handoff (`error_snapshot`, each step result,
+  `attempted_operations`; integer or null), and `collect.py` reads it from there. Parsing the `HTTP <n>:` prefix of the
+  message is a DEPRECATED fallback for handoffs written before the field existed: it runs only when the key is ABSENT
+  (an explicit null is never guessed from text), marks the record `deprecated_parse: true`, and is the only
+  `startswith("HTTP")` in `learning/` (a test checks that by AST). The no-status wire format is byte-identical to D1.
+  Restore: restore-after-red-second-verify is tested via injected failure, not assumed (staged verify real, promoted
+  verify forced red, or forced to raise): spec, server and tests are byte-identical afterwards, no commit, and the
+  proposal STAYS in `proposals/approved/` with a `.reason.txt` (status `rolled_back`; a green-then-red verification is
+  inconsistent, which is not a verdict on the proposal). A crash in the second verify restores too, but the proposal is
+  rejected with the exception text.
+  Coverage gap: travel, retail and banking have no specs, so the learning loop is blind to them until they get specs.
+  `collect.py` prints one startup line, `systems without specs (no proposals possible): banking, retail, travel.`
+  (sorted; computed from `servers/*_server.py` minus `specs/*.yaml`, so it shrinks by itself). Other known limit: the
+  `add_error_code` meaning text is a placeholder for the reviewer to reword.
+  Gate guard: `tests/test_gate_guard.py` now searches `tests/` recursively for the `GATE_MODULES` files (the learning
+  tests live in `tests/learning/`); the fail-on-typo check is retained.
 
 ## Architecture: genericity
 

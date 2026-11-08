@@ -168,7 +168,7 @@ class HttpClient:
                 meaning = rule.get("meaning")
                 msg = f"{meaning} ({detail})" if meaning and detail else (meaning or detail or "no details in response")
                 return ToolFailure(rule["code"], f"HTTP {status}: {msg}", retryable=rule["retryable"],
-                                   recovery=rule["recovery"])
+                                   recovery=rule["recovery"], http_status=status)
         code, retryable, recovery = standard_http_error(status, idempotent)
         return ToolFailure(code, f"HTTP {status}: {detail or 'no details in response'}",
-                           retryable=retryable, recovery=recovery)
+                           retryable=retryable, recovery=recovery, http_status=status)

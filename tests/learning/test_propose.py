@@ -354,3 +354,54 @@ def test_a_new_key_is_still_proposed_after_an_earlier_one_was_decided(tmp_path):
                  encoding="utf-8")
     again = propose(f, s, o)
     assert [x.name for x in again] == [f"weather__{OP}__BOOM__mark_needs_review.patch"]
+
+
+# -- mark_needs_review is never a silent flag: it comes with a human action file --------------------------
+
+def test_mark_needs_review_also_writes_an_action_file_naming_the_operation_and_concrete_spec_paths(tmp_path):
+    f, s, o = setup(tmp_path, two("INVALID_COORDINATES", status=400, arg_types={"latitude": "number"}))
+    spec_before = tree_hash(s)
+    [patch] = propose(f, s, o)
+    action = patch.with_name(patch.name[:-len(".patch")] + ".action.md")
+
+    assert action.exists(), "mark_needs_review must produce <proposal>.action.md next to the proposal"
+    text = action.read_text(encoding="utf-8")
+    assert OP in text and "weather" in text
+    assert "specs/weather.yaml" in text
+    assert f"operations[{OP}].errors" in text, "concrete spec path for the error-code correction"
+    assert f"operations[{OP}].params[latitude].type" in text, "concrete spec path for the param-type correction"
+    assert "INVALID_COORDINATES" in text and "2 times" in text, "the recurring error signature"
+    assert "name: get_current_weather" in text, "the current spec lines are quoted"
+    assert text.count("\n1. ") == 1 and text.count("\n2. ") == 1, "exactly the two likely corrections"
+    assert tree_hash(s) == spec_before, "nothing in specs/ changed"
+
+
+def test_action_file_says_where_the_declared_rule_lives_and_which_line(tmp_path):
+    f, s, o = setup(tmp_path, two("INVALID_COORDINATES", status=400))
+    [patch] = propose(f, s, o)
+    text = patch.with_name(patch.name[:-len(".patch")] + ".action.md").read_text(encoding="utf-8")
+    spec_lines = spec_text(s).split("\n")
+    errors_line = next(i + 1 for i, ln in enumerate(spec_lines) if ln.strip() == "errors:")
+    assert f"(line {errors_line})" in text, "the cited line number must be the real line of `errors:`"
+    assert "IS declared" in text
+
+
+@pytest.mark.parametrize("records,kind", [
+    (two("NOT_FOUND", status=404), "add_error_code"),
+    (two("INVALID_ARGUMENT", arg_types={"latitude": "string"}), "correct_param_type"),
+])
+def test_other_proposal_types_get_no_action_file(tmp_path, records, kind):
+    f, s, o = setup(tmp_path, records)
+    [patch] = propose(f, s, o)
+    assert kind in patch.name
+    assert not list(o.glob("*.action.md"))
+
+
+def test_action_file_is_not_rewritten_once_the_proposal_was_decided(tmp_path):
+    f, s, o = setup(tmp_path, two("INVALID_COORDINATES", status=400))
+    [patch] = propose(f, s, o)
+    action = patch.with_name(patch.name[:-len(".patch")] + ".action.md")
+    (o / "rejected").mkdir()
+    patch.rename(o / "rejected" / patch.name)
+    action.unlink()
+    assert propose(f, s, o) == [] and not action.exists()

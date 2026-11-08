@@ -41,7 +41,7 @@ import guard  # noqa: E402  (offline_guard/guard.py)
 
 GATE_MODULES = {"test_review_gate", "test_pipeline", "test_pipeline_fixtures", "test_pipeline_relative_url",
                 "test_doc_unverified", "test_collect", "test_patchfmt",
-                "test_propose", "test_apply"}
+                "test_propose", "test_apply", "test_http_status"}
 DEFAULT_BUDGET_S = 2.0
 
 

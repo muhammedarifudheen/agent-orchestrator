@@ -96,7 +96,7 @@ async def test_non_retryable_failure_writes_handoff_json_and_stops(tmp_path, car
         "step": 3, "tool": "retail__charge_payment",
         "arguments": data["error_snapshot"]["arguments"], "error_code": "CARD_DECLINED",
         "error_message": "Issuer declined the card.", "retryable": False, "recovery": "human",
-        "consecutive_failures": 1, "consecutive_retryable": 0}
+        "http_status": None, "consecutive_failures": 1, "consecutive_retryable": 0}
     assert data["error_snapshot"]["arguments"]["order_id"].startswith("ORD-")
 
     # decision log: each step has thought, tool, args, result; completed steps precede the failure

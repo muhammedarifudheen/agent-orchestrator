@@ -30,10 +30,15 @@ class ToolFailure(ToolError):
     """A tool failed. Subclasses the SDK's ToolError because v2 hides the text of any other
     exception from the client."""
 
-    def __init__(self, code: str, message: str, retryable: bool, recovery: str) -> None:
+    def __init__(self, code: str, message: str, retryable: bool, recovery: str,
+                 http_status: int | None = None) -> None:
         if recovery not in RECOVERY:
             raise ValueError(f"recovery must be one of {RECOVERY}, got {recovery!r}")
-        super().__init__(f"[{code}] retryable={str(retryable).lower()} recovery={recovery} {message}")
+        # http_status is OPTIONAL structured data (D18): set only when the failure came from an upstream HTTP
+        # response. On the wire it is one extra token before the message, which parse_error strips again.
+        status = f"http_status={int(http_status)} " if http_status is not None else ""
+        super().__init__(f"[{code}] retryable={str(retryable).lower()} recovery={recovery} {status}{message}")
+        self.http_status = None if http_status is None else int(http_status)
         self.code = code
         self.message = message
         self.retryable = retryable

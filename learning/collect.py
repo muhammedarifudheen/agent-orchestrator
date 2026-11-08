@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -32,23 +31,40 @@ def failure_from_handoff(path: Path) -> dict[str, Any] | None:
     system, _, operation = tool.partition("__")
     earlier_same_tool = [s for s in data.get("steps", [])
                          if s.get("tool") == tool and not s.get("ok") and s.get("step", 0) < snap.get("step", 0)]
-    return {
+    status, deprecated = _status_of(snap)
+    rec = {
         "system": system, "operation": operation, "error_code": code,
         "recovery_attempted": bool(earlier_same_tool),
         "outcome": "handed_off_human" if snap.get("recovery") == "human" else "handed_off_exhausted",
         "retryable": snap.get("retryable"), "recovery": snap.get("recovery"),
-        "status": _http_status(snap.get("error_message")),
+        "status": status,
         "message": str(snap.get("error_message") or "")[:200],
         # parameter NAME -> JSON type of the value the agent sent. Never the values: they may be personal data.
         "arg_types": {k: _json_type(v) for k, v in (snap.get("arguments") or {}).items()},
         "ts": data.get("created_at", ""), "recurrence": 1, "sources": [path.name],
     }
+    if deprecated:
+        rec["deprecated_parse"] = True  # status came from the message prefix: an old handoff without http_status
+    return rec
 
 
-def _http_status(message: Any) -> int | None:
-    """The generated HTTP runtime words upstream errors as 'HTTP <status>: ...'."""
-    m = re.match(r"HTTP (\d{3})\b", str(message or ""))
-    return int(m.group(1)) if m else None
+def _status_of(snap: dict[str, Any]) -> tuple[int | None, bool]:
+    """(status, used_deprecated_parse). The orchestrator stores `http_status` (D18); that is the source of truth."""
+    if snap.get("http_status") is not None:
+        return int(snap["http_status"]), False
+    if "http_status" in snap:  # key present and null: the failure had no HTTP status. Do NOT guess from text.
+        return None, False
+    status = _http_status_from_prefix(snap.get("error_message"))
+    return status, status is not None
+
+
+def _http_status_from_prefix(message: Any) -> int | None:
+    """DEPRECATED fallback for handoffs written before `http_status` existed (it breaks whenever a tool rewords
+    its message). Only reached when the key is ABSENT from the snapshot; callers mark the record deprecated_parse."""
+    text = str(message or "")
+    if text.startswith("HTTP ") and text[5:8].isdigit():
+        return int(text[5:8])
+    return None
 
 
 def _json_type(value: Any) -> str:
@@ -90,6 +106,8 @@ def collect(handoffs_dir: Path, out: Path) -> list[dict[str, Any]]:
             match["recurrence"] += 1
             match["sources"].append(rec["sources"][0])
             match["recovery_attempted"] = match["recovery_attempted"] or rec["recovery_attempted"]
+            if rec.get("deprecated_parse"):
+                match["deprecated_parse"] = True
         else:
             records.append(rec)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -106,11 +124,27 @@ def recurrence_totals(records: list[dict[str, Any]]) -> dict[tuple[str, str, str
     return totals
 
 
-def main() -> None:
+def specless_systems(servers_dir: Path, specs_dir: Path) -> list[str]:
+    """Systems that have a server under servers/ but no specs/<system>.yaml (sorted). The learning loop only
+    proposes corrections to specs, so for these it is blind (D18 coverage gap)."""
+    systems = {p.name[:-len("_server.py")] for p in Path(servers_dir).glob("*_server.py") if not p.name.startswith("_")}
+    specced = {p.stem for p in Path(specs_dir).glob("*.yaml")}
+    return sorted(systems - specced)
+
+
+def coverage_line(servers_dir: Path, specs_dir: Path) -> str:
+    names = specless_systems(servers_dir, specs_dir)
+    return f"systems without specs (no proposals possible): {', '.join(names) if names else 'none'}."
+
+
+def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--handoffs", type=Path, default=ROOT / "handoffs")
     ap.add_argument("--out", type=Path, default=ROOT / "learning" / "failures.jsonl")
-    args = ap.parse_args()
+    ap.add_argument("--servers", type=Path, default=ROOT / "servers")
+    ap.add_argument("--specs", type=Path, default=ROOT / "specs")
+    args = ap.parse_args(argv)
+    print(coverage_line(args.servers, args.specs))  # once, at startup, before any work
     recs = collect(args.handoffs, args.out)
     print(f"{len(recs)} failure record(s) in {args.out}")
 

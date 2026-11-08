@@ -250,3 +250,65 @@ def test_red_verification_is_rejected_nothing_promoted_and_not_committed(project
     assert git(layout.root, "status", "--porcelain", "--untracked-files=no", "--", "specs", "servers", "tests") == ""
     assert not (proposals / "applied").exists()
     assert not (layout.inbox / ".staging" / "weather-learn").exists()
+
+
+# -- restore after promotion: tested with an INJECTED failure, not assumed (D18) -------------------------
+
+def _inject_second_verify(monkeypatch, layout, second):
+    """pipeline._verify: the 1st call (staged) is the REAL gate, the 2nd (after promotion) is `second`."""
+    import pipeline
+    real, calls, seen = pipeline._verify, [], {}
+
+    def verify(*args, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            return real(*args, **kw)
+        seen["spec_on_disk_during_second_verify"] = (layout.specs / "weather.yaml").read_text(encoding="utf-8")
+        return second()
+
+    monkeypatch.setattr(pipeline, "_verify", verify)
+    return calls, seen
+
+
+# BUDGET: the staged verification is the real subprocess gate (~4-5 s); the second verify is injected
+@pytest.mark.budget(30)
+def test_second_verify_red_restores_spec_server_tests_and_leaves_the_proposal_approved(project, tmp_path, monkeypatch):
+    layout, proposals = project, tmp_path / "proposals"
+    patch = propose(layout, proposals, "approved", with_rule(layout))
+    before, count = snapshot(layout), commits(layout)
+    calls, seen = _inject_second_verify(monkeypatch, layout, lambda: (False, "INJECTED: contract red after promotion"))
+
+    [result] = apply_approved(proposals, layout)
+
+    assert len(calls) == 2, "the first verify ran for real, the second was the injected red one"
+    assert "NOT_FOUND" in seen["spec_on_disk_during_second_verify"], "the spec WAS promoted before the red verify"
+    assert result.status == "rolled_back" and "INJECTED" in result.reason
+    assert snapshot(layout) == before, "spec, server and tests must be byte-identical to before the attempt"
+    assert commits(layout) == count, "no commit"
+    assert git(layout.root, "status", "--porcelain", "--untracked-files=no", "--", "specs", "servers", "tests") == ""
+    assert patch.exists() and (proposals / "approved" / patch.name) == patch, "the proposal must remain in approved/"
+    assert not (proposals / "applied").exists() and not (proposals / "rejected").exists()
+    assert "INJECTED" in (patch.with_name(patch.name + ".reason.txt")).read_text(encoding="utf-8")
+    assert not (layout.inbox / ".staging" / "weather-learn").exists()
+
+
+def test_second_verify_crash_also_restores_everything(project, tmp_path, monkeypatch):
+    import pipeline
+    layout, proposals = project, tmp_path / "proposals"
+    patch = propose(layout, proposals, "approved", with_rule(layout))
+    before, count = snapshot(layout), commits(layout)
+    calls = []
+
+    def verify(*args, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            return True, "staged ok (stubbed)"
+        raise RuntimeError("injected crash in the second verify")
+
+    monkeypatch.setattr(pipeline, "_verify", verify)
+    [result] = apply_approved(proposals, layout)
+
+    assert len(calls) == 2 and result.status == "rejected" and "injected crash" in result.reason
+    assert snapshot(layout) == before and commits(layout) == count
+    assert git(layout.root, "status", "--porcelain", "--untracked-files=no", "--", "specs", "servers", "tests") == ""
+    assert not (proposals / "applied").exists() and not patch.exists()

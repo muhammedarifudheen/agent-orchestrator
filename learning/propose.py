@@ -274,6 +274,72 @@ def _build(old_text: str, spec: dict[str, Any], op_name: str, code: str, total: 
     return "\n".join(new_lines), expected, why
 
 
+def _line_of(lines: list[str], start: int, end: int, needle: str) -> int | None:
+    """1-based line number of the first line in [start, end) containing `needle`, else None."""
+    return next((i + 1 for i in range(start, end) if needle in lines[i]), None)
+
+
+def _action_md(system: str, op_name: str, code: str, total: int, recs: list[dict[str, Any]], old_text: str,
+               op: dict[str, Any]) -> str:
+    """Human-readable action file for a mark_needs_review proposal: what to check, and where in the spec.
+    A needs_review proposal can never be applied (D14), so without this it would be a dead end."""
+    lines = old_text.split("\n")
+    start, end, _ = _find_op_block(lines, op_name)
+    spec_file = f"specs/{system}.yaml"
+    latest = max(recs, key=lambda r: r.get("ts", ""))
+    observed = {}
+    for r in recs:
+        for pname, ptype in (r.get("arg_types") or {}).items():
+            observed.setdefault(pname, set()).add(ptype)
+    excerpt = "\n".join(f"{i + 1:>4} | {lines[i]}" for i in range(start, min(end, start + 30)))
+    op_line = start + 1
+
+    param_rows = []
+    for p in op.get("params", []):
+        seen = ", ".join(sorted(observed.get(p["name"], []))) or "not seen in failures"
+        line = _line_of(lines, start, end, f"name: {p['name']}")
+        param_rows.append(f"  - `{spec_file}` -> `operations[{op_name}].params[{p['name']}].type` "
+                          f"(line {line}): spec says `{p['type']}`, agents sent: {seen}")
+    declared = [e for e in op.get("errors", []) if e.get("code") == code]
+    err_line = _line_of(lines, start, end, "errors:") or op_line
+    if declared:
+        rule = declared[0]
+        err_text = (f"`{code}` IS declared (`when: {rule['when']}`, retryable={rule['retryable']}, "
+                    f"recovery={rule['recovery']}). Check that retryable/recovery and the `when` match what the "
+                    "system really does.")
+    elif latest.get("status") is not None:
+        err_text = (f"`{code}` is not declared. Add `{{when: {{status: {latest['status']}}}, code: {code}, "
+                    "retryable: ..., recovery: ..., meaning: ...}`.")
+    else:
+        err_text = f"`{code}` is not declared and the failures carry no HTTP status. Add a rule with the right `when`."
+    return f"""# Review needed: {system}.{op_name} keeps failing with {code}
+
+No mechanical fix applies, so the learning loop does NOT change the spec (a spec with `needs_review` operations cannot
+be generated, D14). You decide. This file says what to look at.
+
+## What keeps happening
+- Operation: `{system}__{op_name}` (spec: `{spec_file}`, operation starts at line {op_line})
+- Error signature: `{code}`, seen {total} times in agent handoffs
+- Latest: outcome `{latest.get('outcome')}`, http_status `{latest.get('status')}`, retryable={latest.get('retryable')}, recovery={latest.get('recovery')}
+- Message: {latest.get('message') or '(none)'}
+
+## Current spec lines (`{spec_file}`)
+```
+{excerpt}
+```
+
+## The two most likely corrections
+1. **A parameter type or constraint is wrong** (the agent keeps sending what the spec does not accept):
+{chr(10).join(param_rows) if param_rows else '  - (this operation has no parameters)'}
+2. **The error code is missing or mis-declared** (the failure is real but the spec does not describe it):
+  - `{spec_file}` -> `operations[{op_name}].errors` (line {err_line}): {err_text}
+
+## After you decide
+Edit `{spec_file}` by hand, then run `python -m generators.from_spec {spec_file}` and the contract test. If the cause is
+neither of the above (a business rule, the upstream system itself), leave the spec alone and fix it upstream.
+"""
+
+
 def _already_proposed(out_dir: Path, name: str) -> bool:
     return any((out_dir / sub / name).exists() for sub in DONE_DIRS)
 
@@ -326,6 +392,10 @@ def propose(failures_path: Path, specs_dir: Path, out_dir: Path, report: list[st
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         target = Path(out_dir) / name
         target.write_text(text, encoding="utf-8", newline="\n")
+        if kind == "mark_needs_review":  # unappliable by design (D14): hand the reviewer something to act on
+            action = target.with_name(target.name[:-len(".patch")] + ".action.md")
+            action.write_text(_action_md(system, op_name, code, total, recs, old_text, op), encoding="utf-8", newline="\n")
+            say(f"action file {label}: {action}")
         written.append(target)
         say(f"proposal {label}: {kind} -> {target}")
     return written

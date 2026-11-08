@@ -50,6 +50,7 @@ class Operation:
     recovery: str | None = None  # "agent" | "human" | None (unknown format: treated as human)
     duration_ms: int = 0
     thought: str = ""  # Claude's text in the same turn, before this call
+    http_status: int | None = None  # upstream HTTP status from the ToolFailure, when it had one
 
 
 @dataclass
@@ -192,7 +193,8 @@ class Orchestrator:
                 self._log(state, f"[step {state.steps}] CALL {call.name}({json.dumps(args, default=str)})")
                 out = await self.registry.call(call.name, args)
                 op = Operation(state.steps, call.name, args, out.ok, out.data if out.ok else None,
-                               out.error_code, out.error_message, out.retryable, out.recovery, out.duration_ms, thought)
+                               out.error_code, out.error_message, out.retryable, out.recovery, out.duration_ms, thought,
+                               out.http_status)
                 state.operations.append(op)
                 state.consecutive_failures = 0 if out.ok else state.consecutive_failures + 1
                 self._track(state, op)
@@ -280,6 +282,7 @@ class Orchestrator:
                 "step": trigger.step, "tool": trigger.tool, "arguments": trigger.arguments,
                 "error_code": trigger.error_code, "error_message": trigger.error_message,
                 "retryable": trigger.retryable, "recovery": trigger.recovery,
+                "http_status": trigger.http_status,
                 "consecutive_failures": state.consecutive_failures,
                 "consecutive_retryable": state.consecutive_retryable},
             current_state={
@@ -300,7 +303,8 @@ class Orchestrator:
                     "ok": o.ok,
                     "result": o.result if o.ok else {"error_code": o.error_code,
                                                      "error_message": o.error_message,
-                                                     "retryable": o.retryable, "recovery": o.recovery}}
+                                                     "retryable": o.retryable, "recovery": o.recovery,
+                                                     "http_status": o.http_status}}
                    for o in state.operations],
             decision_log=list(state.log),
         )

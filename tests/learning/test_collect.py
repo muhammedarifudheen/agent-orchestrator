@@ -95,3 +95,43 @@ def test_record_carries_status_and_argument_types_but_never_argument_values(tmp_
     rec = collect(h, out)[0]
     assert rec["status"] == 404 and rec["arg_types"] == {"latitude": "number", "city": "string"}
     assert "Secret Town" not in out.read_text(encoding="utf-8")
+
+
+# -- coverage gap: systems the loop cannot learn about (D18) --------------------------------------------
+
+from learning.collect import coverage_line, main, specless_systems  # noqa: E402
+
+ROOT = __import__("pathlib").Path(__file__).resolve().parents[2]
+
+
+def test_summary_line_names_exactly_the_systems_that_have_a_server_but_no_spec(tmp_path):
+    servers, specs = tmp_path / "servers", tmp_path / "specs"
+    servers.mkdir()
+    specs.mkdir()
+    for name in ("travel_server.py", "retail_server.py", "weather_server.py", "_base.py", "_http.py", "errors.py"):
+        (servers / name).write_text("", encoding="utf-8")
+    (specs / "weather.yaml").write_text("x: 1\n", encoding="utf-8")
+    (specs / "orphan.yaml").write_text("x: 1\n", encoding="utf-8")  # a spec with no server is not a gap
+    assert specless_systems(servers, specs) == ["retail", "travel"]
+    assert coverage_line(servers, specs) == "systems without specs (no proposals possible): retail, travel."
+
+
+def test_summary_line_for_this_repo_matches_what_is_actually_on_disk(tmp_path):
+    servers = {p.name[:-len("_server.py")] for p in (ROOT / "servers").glob("*_server.py")}
+    specced = {p.stem for p in (ROOT / "specs").glob("*.yaml")}
+    expected = sorted(servers - specced)
+    assert expected, "if every system has a spec now, delete the coverage-gap note in D18 and this test"
+    assert {"travel", "retail", "banking"} <= set(expected)
+    assert coverage_line(ROOT / "servers", ROOT / "specs") == \
+        f"systems without specs (no proposals possible): {', '.join(expected)}."
+    assert not (set(expected) & {"weather", "catfact", "dogceo", "jsonplaceholder", "zippopotamus"})
+
+
+def test_cli_prints_the_summary_exactly_once_before_the_count(tmp_path, capsys):
+    h = tmp_path / "handoffs"
+    h.mkdir()
+    main(["--handoffs", str(h), "--out", str(tmp_path / "f.jsonl")])
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert lines[0].startswith("systems without specs (no proposals possible): ")
+    assert sum(ln.startswith("systems without specs") for ln in lines) == 1
+    assert lines[1] == f"0 failure record(s) in {tmp_path / 'f.jsonl'}"

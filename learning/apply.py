@@ -39,13 +39,14 @@ from learning.patchfmt import PatchError, apply_diff, parse_proposal, sha256_byt
 NEEDS_REVIEW_REASON = ("needs_review: the generator refuses needs_review specs (CLAUDE.md D14), so this cannot be "
                        "applied automatically. A person must review the operation and edit the spec by hand "
                        "(set needs_review: false and name a reviewer in review.reviewer).")
+ROLLED_BACK = "ROLLED-BACK:"
 SYSTEM_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 @dataclass
 class Result:
     proposal: str
-    status: str  # "applied" | "rejected"
+    status: str  # "applied" | "rejected" | "rolled_back" (post-promotion verify went red; proposal stays in approved/)
     reason: str = ""
 
 
@@ -72,6 +73,12 @@ def _finish(path: Path, proposals_dir: Path, reason: str | None) -> Result:
     """reason None = applied (file already moved by _try_apply unless it was a late commit note)."""
     if reason is None or reason.startswith("COMMIT-NOTE:"):
         return Result(path.name, "applied", (reason or "")[len("COMMIT-NOTE:"):].strip())
+    if reason.startswith(ROLLED_BACK):
+        # Staged verify was green and the promoted one red: the verification itself is inconsistent, which is not a
+        # verdict on the proposal. Files are restored; the proposal STAYS approved (a person decides what next).
+        note = reason[len(ROLLED_BACK):].strip()
+        path.with_name(path.name + ".reason.txt").write_text(note + "\n", encoding="utf-8")
+        return Result(path.name, "rolled_back", note)
     rejected = proposals_dir / "rejected"
     rejected.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -144,7 +151,8 @@ def _try_apply(path: Path, proposals_dir: Path, layout: pipeline.Layout, commit:
             raise
         if not green:
             _restore(originals)
-            return "post-promotion verification failed (original spec, server and tests restored):\n" + out
+            return (ROLLED_BACK + " post-promotion verification failed (original spec, server and tests restored; "
+                    "the proposal stays in approved/):\n" + out)
     except SpecError as exc:
         _restore(originals)
         return f"generator refused the patched spec: {exc}"
