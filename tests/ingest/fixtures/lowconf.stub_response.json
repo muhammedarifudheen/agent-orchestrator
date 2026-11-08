@@ -1,0 +1,67 @@
+{
+  "system_title": "Bookshelf",
+  "base_url": "https://api.bookshelf.example/v1",
+  "description": "Imaginary read-only book catalogue.",
+  "auth": {"kind": "none"},
+  "operations": [
+    {
+      "name": "get_book",
+      "summary": "Get one catalogue entry by ISBN.",
+      "when_to_call": "Call when you know a book's ISBN and need its title and year.",
+      "method": "GET",
+      "path": "/books/{isbn}",
+      "params": [{"name": "isbn", "type": "string", "in": "path", "required": true, "description": "ISBN of the book."}],
+      "response_type": "object",
+      "response_description": "Object with isbn, title and year.",
+      "example_args": {"isbn": "9780140449136"},
+      "example_response": {"isbn": "9780140449136", "title": "The Odyssey", "year": 1996},
+      "confidence": 0.9,
+      "evidence_quote": "GET `/books/{isbn}` returns the catalogue entry for the book with that ISBN."
+    },
+    {
+      "name": "search_authors",
+      "summary": "Find authors whose name contains some text.",
+      "when_to_call": "Call when you need author records matching part of a name.",
+      "method": "GET",
+      "path": "/authors",
+      "params": [{"name": "name", "type": "string", "in": "query", "required": false, "description": "Part of the author's name."}],
+      "response_type": "array",
+      "response_description": "List of author records.",
+      "example_args": {"name": "Homer"},
+      "example_response": null,
+      "confidence": 0.5,
+      "evidence_quote": "GET `/authors` looks up authors."
+    },
+    {
+      "name": "list_daily_recommendations",
+      "summary": "List the books recommended for today.",
+      "when_to_call": "Call when you want today's recommended books for a mood.",
+      "method": "GET",
+      "path": "/discover/daily",
+      "params": [{"name": "mood", "type": "string", "in": "query", "required": false, "description": "Mood to tailor picks to."}],
+      "response_type": "array",
+      "response_description": "List of recommended books.",
+      "example_args": {"mood": "cozy"},
+      "example_response": [{"isbn": "9780000000001", "title": "A Cozy Book"}],
+      "confidence": 0.95,
+      "evidence_quote": "GET /discover/daily returns a fresh list of recommended books every morning."
+    },
+    {
+      "name": "create_review",
+      "summary": "Post a review for a book.",
+      "when_to_call": "Call when the user wants to publish a review of a book.",
+      "method": "POST",
+      "path": "/books/{isbn}/reviews",
+      "params": [
+        {"name": "isbn", "type": "string", "in": "path", "required": true, "description": "ISBN of the book."},
+        {"name": "rating", "type": "integer", "in": "body", "required": true, "description": "Stars from 1 to 5."}
+      ],
+      "response_type": "object",
+      "response_description": "The created review.",
+      "example_args": {"isbn": "9780140449136", "rating": 5},
+      "example_response": null,
+      "confidence": 0.9,
+      "evidence_quote": "GET `/books/{isbn}` returns the catalogue entry for the book with that ISBN."
+    }
+  ]
+}

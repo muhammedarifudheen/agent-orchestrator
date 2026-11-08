@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -89,9 +90,17 @@ HAND_WRITTEN = [
 ]
 
 
+def spec_dirs() -> list[Path]:
+    """Where generated targets come from: specs/ by default. The ingestion pipeline sets
+    CONTRACT_SPEC_DIRS (os.pathsep separated) to run THIS SAME test on a staged spec before promoting it.
+    Only discovery changes; no assertion depends on it."""
+    raw = os.environ.get("CONTRACT_SPEC_DIRS", "")
+    return [Path(p) for p in raw.split(os.pathsep) if p] or [ROOT / "specs"]
+
+
 def generated_targets() -> list[Target]:
     targets = []
-    for spec_path in sorted((ROOT / "specs").glob("*.yaml")):
+    for spec_path in sorted(p for d in spec_dirs() for p in d.glob("*.yaml")):
         spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
         probes = [{"tool": op["name"], "args": ex["args"], "expect": ex["expect"], "mock": ex.get("mock")}
                   for op in spec["operations"] for ex in op["examples"]]
@@ -218,9 +227,9 @@ async def test_probe_outcome_follows_the_contract(target_probe, monkeypatch):
 
 async def test_missing_arguments_are_a_failure_the_registry_normalizes(target):
     module = load(target)
-    tool = (await tool_list(module))[0]
-    if not tool.input_schema.get("required"):
-        pytest.skip(f"{tool.name} has no required arguments")
+    tool = next((t for t in await tool_list(module) if t.input_schema.get("required")), None)
+    if tool is None:
+        pytest.skip(f"{target.name}: no tool has required arguments")
     result = await run(module, tool.name, {})
     assert result.is_error
     assert parse_error(text_of(result))[:3] == ("INVALID_ARGUMENTS", False, "agent")

@@ -85,6 +85,42 @@ implemented them. Change them here first, then in code.
   crashed through a helper their tool body calls (`Target.crash`), generated ones through the injected
   HTTP transport. The client must see the contract text, never a traceback or a source path.
 
+- D12. `CONFIDENCE_THRESHOLD = 0.75` (in `ingest/common.py`). An ingested operation below it is
+  `needs_review: true`, and so is every write and every operation an ingestor had a reason to doubt;
+  the pipeline refuses to generate from any of them until a NAMED person clears the flag
+  (`review.reviewer`). Doc-ingestion confidence is `min(model self-report, deterministic grounding caps
+  checked against the source text)`: 0.3 if the evidence quote is not in the document, 0.4 if the path is
+  not, 0.6 per parameter that is not. A model's self-reported confidence is uncalibrated and a
+  hallucinating model can be confidently wrong, so it is never trusted on its own. 0.75 sits above every
+  grounding cap (any ungrounded element forces review) and below a clean extraction (about 0.9), so
+  well-documented read operations pass. Trace-derived: 0.78 for one sample, 0.9 for two or more
+  consistent samples, 0.7 for inconsistent ones. OpenAPI-derived: 0.95 minus 0.1-0.15 per weakness.
+  Changing the number is a decision: edit this line and the constant in the same commit
+  (`tests/test_review_gate.py` fails if they disagree). Never lower it to get a gate to pass.
+
+- D13. `specs/schema.json` gained three OPTIONAL operation fields, because ingestion needs somewhere to
+  record doubt: `needs_review` (bool), `confidence` (0..1), `review_reasons` (list of strings). Nothing
+  else in the schema changed; existing specs are unaffected. Why: the review gate needs a flag that
+  lives in the spec itself, where a person can see and clear it.
+- D14. `generators/from_spec.py` changed in two small ways, both load-bearing and both tested: (a) schema
+  validation is split out as `validate_schema(spec)` (the pipeline reuses it instead of a second validator;
+  `load_spec` calls it first); (b) `check_semantics` REFUSES any operation with `needs_review: true`, so
+  "approved" means something even when someone calls the generator directly and skips the pipeline.
+  `tests/test_contract.py` changed in discovery only: `CONTRACT_SPEC_DIRS` (default `specs/`) lets the
+  pipeline run the identical test on a staged spec; no assertion depends on it.
+- D15. Ingestion never decides safety. Every non-GET/HEAD operation is `needs_review: true`, because the
+  HTTP method cannot tell whether a call moves money, is idempotent, or is safe to retry. A cleared flag
+  also needs `review.reviewer` (a named person) whenever the operation had review reasons, was a write, or
+  was below the D12 threshold; naming a reviewer without clearing the flag does not unblock either.
+  One flagged operation blocks the whole spec (the good operations are held too).
+- D16. Doc ingestion (`ingest/doc.py`, needs the Claude API) is the weakest link and is NOT verified
+  against a real model: there was no `ANTHROPIC_API_KEY` when it was built, so it is tested with
+  `ingest/testing.StubAnthropic` only (wiring + the grounding checks, not extraction quality). Known risk:
+  the Claude API guidance says the current default model (`claude-sonnet-5-5`) rejects a FORCED
+  `tool_choice`; `doc.py` retries once with `auto` when the error mentions `tool_choice`, and that retry has
+  never run. Its grounding checks are string matches: they catch invented paths/params/quotes, not a real
+  path attached to the wrong method or meaning. Treat a doc-ingested spec as a draft to read, not to trust.
+
 ## Architecture: genericity
 
 Goal: a pipeline that turns ANY reachable system into tools with the same contract, without a
@@ -306,6 +342,21 @@ server (spec only, zero hand-written server code) passes the same contract test 
 `travel`, and its real API calls work (`LIVE_TESTS=1`). It does not yet show the generator copes with
 a messier system than a two-operation read-only API.
 
+### Ingestion pipeline (built)
+`inbox/` -> `pipeline.py` -> `specs/<name>.yaml` + `servers/<name>_server.py` + `tests/test_<name>.py`.
+Drop an OpenAPI/Swagger document, a HAR or request/response-pairs JSON, pasted API docs (`.md/.txt`), or an
+already-written spec into `inbox/`, then `python pipeline.py --once` (or run it with no flag to watch).
+Flow: detect type -> ingestor drafts a spec (`ingest/openapi.py` deterministic, `ingest/trace.py`
+deterministic, `ingest/doc.py` Claude + grounding checks) -> `validate_schema` -> REVIEW GATE -> stage
+under `inbox/.staging/` -> generate -> run the generated tests AND `tests/test_contract.py` on the staged
+spec -> promote -> regenerate from the promoted spec and re-run both. Any failure rolls back.
+Outcomes: `inbox/done/` (generated), `inbox/review/<name>.spec.yaml` + `.review.md` (blocked; edit the
+draft, clear the flags, name yourself in `review.reviewer`, move it back to `inbox/`), `inbox/failed/` +
+`<file>.reason.txt`. Existing servers are never overwritten. Secrets in traces are never copied into specs.
+Known limits: OpenAPI with only a relative `servers[0].url` is refused (edit in an absolute URL);
+OAuth2/OpenID/MFA/cookie auth is flagged, not supported; array/object params are omitted and flagged;
+trace templating is heuristic; every ingested spec still needs a person to read it.
+
 ## Rules
 
 1. **No industry logic in the Agent layer.** No "if flight", "if refund", "if account balance" in
@@ -349,6 +400,7 @@ set TRAVEL_FAIL_MODE=all_down & python demo.py        # exercise human handoff
 python -m pytest -q                                   # all tests (in-memory mcp.Client + stub LLM)
 python -m generators.from_spec specs/weather.yaml     # (re)generate servers/weather_server.py + tests
 python -m generators.from_spec specs/weather.yaml --check   # CI: exit 1 if generated files are stale
+python pipeline.py --once                             # ingest + gate + generate + verify everything in inbox/
 set LIVE_TESTS=1 & python -m pytest tests/test_weather.py   # also call the real Open-Meteo API
 ```
 
@@ -370,6 +422,9 @@ set LIVE_TESTS=1 & python -m pytest tests/test_weather.py   # also call the real
 | weather (generated, real API) | `get_daily_forecast(latitude, longitude, days=3)` | none | Open-Meteo, no key |
 | jsonplaceholder (generated, real API) | `get_post(post_id)`, `get_user(user_id)` | none | object / nested object responses |
 | jsonplaceholder (generated, real API) | `list_posts_by_user(user_id)`, `list_comments_for_post(post_id)` | none | array responses; unknown id = empty list, not an error |
+| zippopotamus (from OpenAPI via pipeline, real API) | `get_places_by_postal_code`, `get_postal_codes_by_place` | none | `ingest/openapi.py` |
+| catfact (from a recorded HAR via pipeline, real API) | `get_fact`, `list_facts`, `list_breeds` | none | `ingest/trace.py` |
+| dogceo (from pasted docs via pipeline, real API) | `list_all_breeds`, `get_random_dog_image`, `get_random_image_by_breed` | none | `ingest/doc.py`, spec built from a STUB model response (see D16) |
 
 Outage simulation env vars: `TRAVEL_FAIL_MODE`, `RETAIL_FAIL_MODE=payment_down`, `BANKING_FAIL_MODE=core_down`.
 

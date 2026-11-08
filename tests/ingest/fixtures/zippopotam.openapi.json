@@ -1,0 +1,88 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Zippopotam.us",
+    "description": "Free public API that returns the places (cities, states, coordinates) for a postal code, or the postal codes for a place. No API key required.",
+    "version": "1.0.0"
+  },
+  "servers": [{"url": "https://api.zippopotam.us"}],
+  "paths": {
+    "/{countryCode}/{postalCode}": {
+      "get": {
+        "operationId": "getPlacesByPostalCode",
+        "summary": "Look up the places for a postal code",
+        "description": "Call when you have a postal code and need the place name, state and coordinates it belongs to.",
+        "parameters": [
+          {"name": "countryCode", "in": "path", "required": true, "description": "Two-letter country code, lower case.",
+           "schema": {"type": "string", "minLength": 2, "maxLength": 2}, "example": "us"},
+          {"name": "postalCode", "in": "path", "required": true, "description": "The postal code to look up.",
+           "schema": {"type": "string"}, "example": "90210"}
+        ],
+        "responses": {
+          "200": {
+            "description": "The country and the places for the postal code.",
+            "content": {"application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["post code", "country", "places"],
+                "properties": {
+                  "post code": {"type": "string"},
+                  "country": {"type": "string"},
+                  "country abbreviation": {"type": "string"},
+                  "places": {"type": "array", "items": {"type": "object", "properties": {
+                    "place name": {"type": "string"}, "longitude": {"type": "string"}, "latitude": {"type": "string"},
+                    "state": {"type": "string"}, "state abbreviation": {"type": "string"}}}}
+                }
+              },
+              "example": {"post code": "90210", "country": "United States", "country abbreviation": "US",
+                          "places": [{"place name": "Beverly Hills", "longitude": "-118.4065", "latitude": "34.0901",
+                                      "state": "California", "state abbreviation": "CA"}]}
+            }}
+          },
+          "404": {"description": "Unknown postal code; the body is an empty object."}
+        }
+      }
+    },
+    "/{countryCode}/{stateAbbreviation}/{placeName}": {
+      "get": {
+        "operationId": "getPostalCodesByPlace",
+        "summary": "Look up the postal codes for a place name",
+        "description": "Call when you have a country, a state abbreviation and a place name and need the matching postal codes.",
+        "parameters": [
+          {"name": "countryCode", "in": "path", "required": true, "description": "Two-letter country code, lower case.",
+           "schema": {"type": "string", "minLength": 2, "maxLength": 2}, "example": "us"},
+          {"name": "stateAbbreviation", "in": "path", "required": true, "description": "State abbreviation, lower case.",
+           "schema": {"type": "string"}, "example": "ma"},
+          {"name": "placeName", "in": "path", "required": true, "description": "Name of the place (city or town).",
+           "schema": {"type": "string"}, "example": "belmont"}
+        ],
+        "responses": {
+          "200": {
+            "description": "The place and its postal codes.",
+            "content": {"application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["country", "state", "place name", "places"],
+                "properties": {
+                  "country": {"type": "string"},
+                  "country abbreviation": {"type": "string"},
+                  "state": {"type": "string"},
+                  "state abbreviation": {"type": "string"},
+                  "place name": {"type": "string"},
+                  "places": {"type": "array", "items": {"type": "object", "properties": {
+                    "place name": {"type": "string"}, "longitude": {"type": "string"}, "latitude": {"type": "string"},
+                    "post code": {"type": "string"}}}}
+                }
+              },
+              "example": {"country": "United States", "country abbreviation": "US", "state": "Massachusetts",
+                          "state abbreviation": "MA", "place name": "Belmont",
+                          "places": [{"place name": "Belmont", "longitude": "-71.4594", "latitude": "42.4464", "post code": "02178"},
+                                     {"place name": "Belmont", "longitude": "-71.2044", "latitude": "42.4128", "post code": "02478"}]}
+            }}
+          },
+          "404": {"description": "Unknown place; the body is an empty object."}
+        }
+      }
+    }
+  }
+}

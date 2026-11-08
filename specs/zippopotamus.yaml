@@ -1,0 +1,169 @@
+system_name: zippopotamus
+description: Free public API that returns the places (cities, states, coordinates)
+  for a postal code, or the postal codes for a place. No API key required.
+base_url: https://api.zippopotam.us
+base_url_env: ZIPPOPOTAMUS_BASE_URL
+timeout_s: 10
+auth:
+  kind: none
+error_map:
+- when:
+    status: 429
+  code: RATE_LIMITED
+  retryable: true
+  recovery: agent
+  meaning: Rate limit reached; retry later
+- when:
+    status: 5xx
+  code: SERVICE_UNAVAILABLE
+  retryable: true
+  recovery: agent
+  meaning: The service is unavailable
+operations:
+- name: get_places_by_postal_code
+  summary: Look up the places for a postal code
+  when_to_call: Call when you have a postal code and need the place name, state and
+    coordinates it belongs to.
+  side_effect: read
+  idempotent: true
+  request:
+    method: GET
+    path: /{country_code}/{postal_code}
+  params:
+  - name: country_code
+    type: string
+    in: path
+    required: true
+    description: Two-letter country code, lower case.
+    constraints:
+      min_length: 2
+      max_length: 2
+  - name: postal_code
+    type: string
+    in: path
+    required: true
+    description: The postal code to look up.
+  response:
+    type: object
+    description: 'The country and the places for the postal code. Fields: post code,
+      country, country abbreviation, places.'
+  examples:
+  - name: example
+    args:
+      country_code: us
+      postal_code: '90210'
+    mock:
+      status: 200
+      body:
+        post code: '90210'
+        country: United States
+        country abbreviation: US
+        places:
+        - place name: Beverly Hills
+          longitude: '-118.4065'
+          latitude: '34.0901'
+          state: California
+          state abbreviation: CA
+    expect: ok
+    expect_keys:
+    - post code
+    - country
+    - places
+  - name: service_unavailable
+    args:
+      country_code: us
+      postal_code: '90210'
+    mock:
+      status: 503
+      body:
+        error: service unavailable
+    expect:
+      code: SERVICE_UNAVAILABLE
+      retryable: true
+      recovery: agent
+  review:
+    source: openapi
+    safety_fields: unreviewed
+  confidence: 0.95
+  needs_review: false
+  review_reasons: []
+- name: get_postal_codes_by_place
+  summary: Look up the postal codes for a place name
+  when_to_call: Call when you have a country, a state abbreviation and a place name
+    and need the matching postal codes.
+  side_effect: read
+  idempotent: true
+  request:
+    method: GET
+    path: /{country_code}/{state_abbreviation}/{place_name}
+  params:
+  - name: country_code
+    type: string
+    in: path
+    required: true
+    description: Two-letter country code, lower case.
+    constraints:
+      min_length: 2
+      max_length: 2
+  - name: state_abbreviation
+    type: string
+    in: path
+    required: true
+    description: State abbreviation, lower case.
+  - name: place_name
+    type: string
+    in: path
+    required: true
+    description: Name of the place (city or town).
+  response:
+    type: object
+    description: 'The place and its postal codes. Fields: country, country abbreviation,
+      state, state abbreviation, place name, places.'
+  examples:
+  - name: example
+    args:
+      country_code: us
+      state_abbreviation: ma
+      place_name: belmont
+    mock:
+      status: 200
+      body:
+        country: United States
+        country abbreviation: US
+        state: Massachusetts
+        state abbreviation: MA
+        place name: Belmont
+        places:
+        - place name: Belmont
+          longitude: '-71.4594'
+          latitude: '42.4464'
+          post code: 02178
+        - place name: Belmont
+          longitude: '-71.2044'
+          latitude: '42.4128'
+          post code: 02478
+    expect: ok
+    expect_keys:
+    - country
+    - state
+    - place name
+    - places
+  - name: service_unavailable
+    args:
+      country_code: us
+      state_abbreviation: ma
+      place_name: belmont
+    mock:
+      status: 503
+      body:
+        error: service unavailable
+    expect:
+      code: SERVICE_UNAVAILABLE
+      retryable: true
+      recovery: agent
+  review:
+    source: openapi
+    safety_fields: unreviewed
+  confidence: 0.95
+  needs_review: false
+  review_reasons: []

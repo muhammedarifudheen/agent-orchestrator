@@ -1,0 +1,52 @@
+{
+  "system_title": "Dog CEO",
+  "base_url": "https://dog.ceo/api",
+  "description": "Free read-only service returning dog breed lists and random dog photos as JSON, no key needed.",
+  "auth": {"kind": "none"},
+  "operations": [
+    {
+      "name": "list_all_breeds",
+      "summary": "List every dog breed and its sub-breeds.",
+      "when_to_call": "Call when you need the valid breed names, for example before asking for a picture of one breed.",
+      "method": "GET",
+      "path": "/breeds/list/all",
+      "params": [],
+      "response_type": "object",
+      "response_description": "Object with message (breed name to list of sub-breed names) and status.",
+      "example_args": {},
+      "example_response": {"message": {"affenpinscher": [], "african": ["wild"], "australian": ["kelpie", "shepherd"]}, "status": "success"},
+      "confidence": 0.9,
+      "evidence_quote": "Send a GET request to `/breeds/list/all`. It takes no parameters."
+    },
+    {
+      "name": "get_random_dog_image",
+      "summary": "Get the web address of one random dog photo from any breed.",
+      "when_to_call": "Call when you want a random dog picture and do not care about the breed.",
+      "method": "GET",
+      "path": "/breeds/image/random",
+      "params": [],
+      "response_type": "object",
+      "response_description": "Object with message (photo URL) and status.",
+      "example_args": {},
+      "example_response": {"message": "https://images.dog.ceo/breeds/brabancon/n02112706_449.jpg", "status": "success"},
+      "confidence": 0.9,
+      "evidence_quote": "Send a GET request to `/breeds/image/random`. It takes no parameters."
+    },
+    {
+      "name": "get_random_image_by_breed",
+      "summary": "Get the web address of one random photo of a chosen breed.",
+      "when_to_call": "Call when you want a random picture of a specific main breed such as hound.",
+      "method": "GET",
+      "path": "/breed/{breed}/images/random",
+      "params": [
+        {"name": "breed", "type": "string", "in": "path", "required": true, "description": "Main breed name, for example hound."}
+      ],
+      "response_type": "object",
+      "response_description": "Object with message (photo URL) and status.",
+      "example_args": {"breed": "hound"},
+      "example_response": {"message": "https://images.dog.ceo/breeds/hound-basset/n02088238_9922.jpg", "status": "success"},
+      "confidence": 0.9,
+      "evidence_quote": "The `breed` value is required and is part of the path."
+    }
+  ]
+}

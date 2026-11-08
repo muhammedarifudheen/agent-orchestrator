@@ -37,14 +37,19 @@ class SpecError(ValueError):
 
 # -- loading + validation ----------------------------------------------------------------------
 
-def load_spec(path: Path) -> tuple[dict[str, Any], str]:
-    """Return (validated spec, short sha256 of the normalized spec text)."""
-    raw = path.read_text(encoding="utf-8").replace("\r\n", "\n")
-    spec = yaml.safe_load(raw)
+def validate_schema(spec: Any) -> None:
+    """Validate a spec dict against specs/schema.json only (shape, types, unknown keys)."""
     schema = json.loads((ROOT / "specs" / "schema.json").read_text(encoding="utf-8"))
     errors = sorted(jsonschema.Draft7Validator(schema).iter_errors(spec), key=lambda e: list(e.path))
     if errors:
         raise SpecError("\n".join(f"{'/'.join(map(str, e.path)) or '<root>'}: {e.message}" for e in errors))
+
+
+def load_spec(path: Path) -> tuple[dict[str, Any], str]:
+    """Return (validated spec, short sha256 of the normalized spec text)."""
+    raw = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+    spec = yaml.safe_load(raw)
+    validate_schema(spec)
     check_semantics(spec)
     return spec, hashlib.sha256(raw.encode()).hexdigest()[:12]
 
@@ -55,6 +60,9 @@ def check_semantics(spec: dict[str, Any]) -> None:
         raise SpecError(f"duplicate operation names: {sorted({n for n in names if names.count(n) > 1})}")
     for op in spec["operations"]:
         n = op["name"]
+        if op.get("needs_review"):
+            raise SpecError(f"{n}: REFUSED. needs_review is true: a person must review this operation, then set "
+                            "needs_review: false (and review.reviewer) before a server is generated.")
         if spec.get("read_only") and (op["side_effect"] != "read" or op["request"]["method"] not in ("GET", "HEAD")):
             raise SpecError(f"{n}: REFUSED. The spec declares read_only: true but this operation is "
                             f"{op['request']['method']} with side_effect={op['side_effect']}.")
