@@ -144,6 +144,26 @@ implemented them. Change them here first, then in code.
   the tests that run the pipeline's subprocess gates declare `@pytest.mark.budget(N)` (30 s, 15 s for the
   one-subprocess rollback test) against ~7-9 s normally. A violation fails that test BY NAME with its duration.
   `tests/test_gate_guard.py` tests the guards, and both were demonstrated firing.
+- D18. Failure-driven learning loop (`learning/`). An unrecoverable failure becomes a CANDIDATE spec correction that
+  a person approves; nothing is ever auto-applied. Flow: `collect.py` (handoffs/*.json -> `learning/failures.jsonl`,
+  one record per (system, operation, code) per 24h window with a `recurrence` count; it keeps parameter TYPES, never
+  argument values, and re-runs never double-count) -> `propose.py` (recurrence >= `MIN_RECURRENCE = 2`, summed across
+  windows; writes `proposals/<system>__<op>__<code>__<type>.patch`, a unified diff plus a header with the spec's
+  sha256; READ-ONLY on specs/, byte-identity is tested) -> a human moves the file to `proposals/approved/` or
+  `proposals/rejected/` -> `apply.py` acts ONLY on `approved/`: patch -> stage -> regenerate -> the SAME
+  `tests/test_contract.py` plus the generated tests (`pipeline._verify`) -> promote -> verify again -> commit only
+  then. Types, first match wins: `correct_param_type` (an argument-validation error plus an observed argument type that
+  differs from the spec; a number param that was sent an integer is NOT an error), `add_error_code` (code not declared
+  in the operation or the spec's error_map, and the HTTP status is known; the status is read from the runtime's
+  "HTTP <status>:" message because handoffs do not store it), `mark_needs_review` (everything else). A
+  `mark_needs_review` proposal, or any patched spec that holds a `needs_review` operation, is REJECTED by apply with a
+  reason (D14: the generator refuses such specs); it can only be resolved by a person editing and reviewing the spec by
+  hand. Stale proposals (spec hash changed), non-applying diffs and path escapes are rejected; a red verification
+  leaves spec/server/tests byte-identical. Known limits: hand-written systems (travel/retail/banking) have no spec, so
+  they are reported as skipped and get no proposal; the post-promotion restore branch of apply.py has no test (a red
+  second verify cannot be produced naturally, because both verifies run the same spec and generator); the
+  `add_error_code` meaning text is a placeholder for the reviewer to reword. `MIN_RECURRENCE` and
+  `CONFIDENCE_THRESHOLD` change only by a decision recorded here.
 
 ## Architecture: genericity
 
@@ -425,6 +445,8 @@ python -m pytest -q                                   # all tests (in-memory mcp
 python -m generators.from_spec specs/weather.yaml     # (re)generate servers/weather_server.py + tests
 python -m generators.from_spec specs/weather.yaml --check   # CI: exit 1 if generated files are stale
 python pipeline.py --once                             # ingest + gate + generate + verify everything in inbox/
+python -m learning.collect && python -m learning.propose   # handoffs -> failures.jsonl -> proposals/*.patch (read-only on specs/)
+python -m learning.apply                              # apply proposals a human moved into proposals/approved/ (verify, then commit)
 set LIVE_TESTS=1 & python -m pytest tests/test_weather.py   # also call the real Open-Meteo API
 ```
 

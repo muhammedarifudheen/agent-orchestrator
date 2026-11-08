@@ -4,3 +4,9 @@ __pycache__/
 handoffs/*.json
 inbox/*
 !inbox/.gitkeep
+
+# learning loop: derived from handoffs, regenerable
+learning/failures.jsonl
+proposals/*.patch
+proposals/*/*.patch
+proposals/*/*.reason.txt

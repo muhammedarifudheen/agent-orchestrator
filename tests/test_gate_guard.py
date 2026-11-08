@@ -24,7 +24,7 @@ def test_budget_violation_names_the_test_and_the_duration():
 
 def test_every_gate_module_exists():
     for name in GATE_MODULES:
-        assert (ROOT / "tests" / f"{name}.py").exists(), f"GATE_MODULES lists {name} but there is no such test file"
+        assert list((ROOT / "tests").rglob(f"{name}.py")), f"GATE_MODULES lists {name} but there is no such test file"
 
 
 def test_in_process_guard_blocks_dns_and_connects_but_allows_loopback():
