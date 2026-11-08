@@ -10,6 +10,7 @@
     "base_url": {"type": "string", "pattern": "^https?://"},
     "base_url_env": {"type": "string", "description": "Env var that overrides base_url (e.g. to point at a sandbox)."},
     "timeout_s": {"type": "number", "exclusiveMinimum": 0},
+    "source": {"type": "string", "description": "Provenance of the whole spec. 'doc-unverified' = extracted by an LLM from pasted documentation and NOT verified against a real model run or the live API; the pipeline warns whenever it generates from one."},
     "read_only": {"type": "boolean", "description": "true = this system must only ever be READ. The generator refuses any operation with side_effect other than read, and the runtime refuses to send any non-GET/HEAD request. Enforced, not advisory."},
     "auth": {
       "type": "object",

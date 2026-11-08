@@ -30,6 +30,7 @@ import yaml
 
 from generators.from_spec import ROOT, SpecError, generate, validate_schema
 from ingest.common import CONFIDENCE_THRESHOLD
+from ingest.doc import UNVERIFIED_SOURCE, DocNoToolCall
 
 KINDS = ("openapi", "trace", "doc", "spec")
 
@@ -61,6 +62,7 @@ class Outcome:
     tools: list[str] = field(default_factory=list)
     findings: list[str] = field(default_factory=list)
     review_file: Path | None = None
+    warnings: list[str] = field(default_factory=list)  # printed by the CLI next to the result
 
 
 # -- detection ---------------------------------------------------------------------------------
@@ -92,8 +94,8 @@ def detect_type(path: Path) -> str:
                      "request/response pairs, API documentation text, or a finished spec)")
 
 
-def run_ingestor(kind: str, path: Path, doc_client: Any = None) -> dict[str, Any]:
-    """Route to the ingestor for `kind`; returns a draft spec dict."""
+def run_ingestor(kind: str, path: Path, doc_client: Any = None, notes: list[str] | None = None) -> dict[str, Any]:
+    """Route to the ingestor for `kind`; returns a draft spec dict. `notes` collects visible warnings."""
     if kind == "openapi":
         from ingest import openapi
         return openapi.ingest(openapi.load(path))
@@ -102,7 +104,13 @@ def run_ingestor(kind: str, path: Path, doc_client: Any = None) -> dict[str, Any
         return trace.ingest(trace.load(path))
     if kind == "doc":
         from ingest import doc
-        return doc.ingest(path.read_text(encoding="utf-8-sig"), client=doc_client)
+        text = path.read_text(encoding="utf-8-sig")
+        try:
+            return doc.ingest(text, client=doc_client)
+        except DocNoToolCall as first:  # explicit, recoverable, retried ONCE with a stricter prompt, and reported
+            if notes is not None:
+                notes.append(f"RETRIED once with a stricter prompt: the model did not call the extraction tool ({first})")
+            return doc.ingest(text, client=doc_client, strict=True)
     if kind == "spec":
         return _load_structured(path)
     raise ValueError(kind)
@@ -181,7 +189,8 @@ def _fail(layout: Layout, source: Path, kind: str | None, name: str | None, reas
 def _pytest(layout: Layout, args: list[str], servers_dirs: list[Path], spec_dir: Path) -> tuple[bool, str]:
     """Run pytest in a subprocess against the project's pytest.ini. Returns (green, tail of output)."""
     env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join([str(p) for p in servers_dirs] + [str(ROOT / "servers"), str(ROOT)])
+    env["PYTHONPATH"] = os.pathsep.join([str(ROOT / "offline_guard")] + [str(p) for p in servers_dirs]
+                                        + [str(ROOT / "servers"), str(ROOT)])  # guard first: gates run offline
     env["CONTRACT_SPEC_DIRS"] = str(spec_dir)
     env.pop("LIVE_TESTS", None)  # gates run offline; live checks are a separate, explicit step
     # `-o pythonpath=.` keeps pytest.ini from putting the real servers/ ahead of the staged one (PYTHONPATH order rules)
@@ -207,11 +216,17 @@ def _verify(layout: Layout, name: str, servers_dir: Path, tests_dir: Path, spec_
 
 def process(source: Path, layout: Layout | None = None, doc_client: Any = None) -> Outcome:
     """Run one inbox file through the whole pipeline. Never raises: every failure is an Outcome."""
-    layout = layout or Layout()
+    warnings: list[str] = []
+    outcome = _process(source, layout or Layout(), doc_client, warnings)
+    outcome.warnings = warnings
+    return outcome
+
+
+def _process(source: Path, layout: Layout, doc_client: Any, warnings: list[str]) -> Outcome:
     kind = name = None
     try:
         kind = detect_type(source)
-        spec = run_ingestor(kind, source, doc_client)
+        spec = run_ingestor(kind, source, doc_client, warnings)
     except Exception as exc:  # ingestors raise IngestError; anything else is still a reportable failure
         return _fail(layout, source, kind, None, f"{kind or 'detect'}: {type(exc).__name__}: {exc}")
 
@@ -220,6 +235,9 @@ def process(source: Path, layout: Layout | None = None, doc_client: Any = None) 
     except SpecError as exc:
         return _fail(layout, source, kind, None, f"the {kind} ingestor produced an invalid spec:\n{exc}")
     name = spec["system_name"]
+    if spec.get("source") == UNVERIFIED_SOURCE:
+        warnings.append(f"{name} was extracted from documentation by an LLM and is UNVERIFIED ({UNVERIFIED_SOURCE}): "
+                        "no real-model run has checked this path; read the spec before relying on it")
 
     findings = review_findings(spec)
     if findings:  # REVIEW GATE: nothing is generated
@@ -275,13 +293,17 @@ def process(source: Path, layout: Layout | None = None, doc_client: Any = None) 
 
 
 def pending(layout: Layout, settle_s: float = 1.0) -> list[Path]:
-    """Top-level inbox files that are finished being written."""
+    """Top-level inbox files that are finished being written.
+
+    With settle_s <= 0 there is NO age check. (A age check of ``now - mtime >= 0`` is wrong: on Windows the wall clock
+    ticks every ~15.6 ms, so a freshly written file's mtime is ahead of time.time() about 15% of the time and the
+    file would be skipped. CLAUDE.md D17.)"""
     if not layout.inbox.is_dir():
         return []
     now = time.time()
     return sorted(p for p in layout.inbox.iterdir()
                   if p.is_file() and not p.name.startswith(".") and not p.name.endswith(".reason.txt")
-                  and now - p.stat().st_mtime >= settle_s)
+                  and (settle_s <= 0 or now - p.stat().st_mtime >= settle_s))
 
 
 def watch(layout: Layout | None = None, interval: float = 2.0, once: bool = False, doc_client: Any = None) -> list[Outcome]:
@@ -294,6 +316,8 @@ def watch(layout: Layout | None = None, interval: float = 2.0, once: bool = Fals
             print(f"[{outcome.status.upper():9s}] {path.name} ({outcome.kind}) -> {outcome.name}: {outcome.detail.splitlines()[0] if outcome.detail else ''}")
             for tool in outcome.tools:
                 print(f"    {tool}")
+            for warning in outcome.warnings:
+                print(f"    WARNING: {warning}")
             for finding in outcome.findings:
                 print(f"    REVIEW: {finding}")
         if once:

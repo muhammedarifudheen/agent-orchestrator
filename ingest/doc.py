@@ -98,6 +98,24 @@ class IngestError(ValueError):
     """The document could not be turned into a draft spec (no key, bad model output, ...)."""
 
 
+class DocNoToolCall(IngestError):
+    """The model replied without calling the extraction tool. Recoverable: the caller may retry ONCE with
+    ``strict=True`` (a stricter prompt); it is never silently papered over. Carries the same fields a
+    ToolFailure does (code / retryable / recovery) and the same text format."""
+
+    code = "DOC_NO_TOOL_CALL"
+    retryable = True
+    recovery = "agent"
+
+    def __init__(self, stop_reason: Any, said: str = "") -> None:
+        super().__init__(f"[{self.code}] retryable=true recovery=agent the model did not call the {TOOL_NAME} "
+                         f"tool (stop_reason={stop_reason}); it said: {said!r}")
+
+
+# Provenance written into every spec this module produces. Never "verified": no real-model run has checked this path.
+UNVERIFIED_SOURCE = "doc-unverified"
+
+
 # -- LLM step ------------------------------------------------------------------------------------
 
 def _get_client() -> Any:
@@ -111,27 +129,31 @@ def _get_client() -> Any:
         raise IngestError(f"could not create the Anthropic client: {type(exc).__name__}: {exc}") from exc
 
 
-def _call_model(client: Any, model: str, text: str) -> dict[str, Any]:
-    kwargs: dict[str, Any] = dict(model=model, max_tokens=16000, system=SYSTEM_PROMPT, tools=[TOOL_SCHEMA],
-                                  messages=[{"role": "user", "content": "Documentation to analyse:\n\n" + text}])
+STRICT_SUFFIX = (
+    "\nIMPORTANT: your previous reply did not call the tool. Reply ONLY by calling the "
+    f"{TOOL_NAME} tool. No prose, no apologies, no questions; if you are unsure, call the tool with low confidence."
+)
+
+
+def _call_model(client: Any, model: str, text: str, strict: bool = False) -> dict[str, Any]:
+    """ONE call, tool_choice "auto". The happy path is the tested path: no forced choice, no fallback.
+    If the model answers without calling the tool that is an explicit, recoverable failure (DocNoToolCall)."""
     try:
-        resp = client.messages.create(**kwargs, tool_choice={"type": "tool", "name": TOOL_NAME})
+        resp = client.messages.create(
+            model=model, max_tokens=16000, system=SYSTEM_PROMPT + (STRICT_SUFFIX if strict else ""),
+            tools=[TOOL_SCHEMA], tool_choice={"type": "auto"},
+            messages=[{"role": "user", "content": "Documentation to analyse:\n\n" + text}])
     except Exception as exc:
-        # Some newer models reject forced tool_choice with HTTP 400; retry once letting the model choose
-        # (the system prompt already orders it to call the tool). Any other failure is reported plainly.
-        if "tool_choice" not in str(exc):
-            raise IngestError(f"Claude API call failed: {type(exc).__name__}: {exc}") from exc
-        try:
-            resp = client.messages.create(**kwargs, tool_choice={"type": "auto"})
-        except Exception as exc2:
-            raise IngestError(f"Claude API call failed: {type(exc2).__name__}: {exc2}") from exc2
-    for block in getattr(resp, "content", None) or []:
+        raise IngestError(f"Claude API call failed: {type(exc).__name__}: {exc}") from exc
+    blocks = getattr(resp, "content", None) or []
+    for block in blocks:
         if getattr(block, "type", None) == "tool_use" and getattr(block, "name", None) == TOOL_NAME:
             data = block.input
             if not isinstance(data, dict):
                 raise IngestError("the model's tool input is not a JSON object")
             return data
-    raise IngestError(f"the model did not call the {TOOL_NAME} tool (stop_reason={getattr(resp, 'stop_reason', None)})")
+    said = " ".join(str(getattr(b, "text", "")) for b in blocks if getattr(b, "type", None) == "text").strip()
+    raise DocNoToolCall(getattr(resp, "stop_reason", None), said[:200])
 
 
 # -- deterministic verification --------------------------------------------------------------------
@@ -244,13 +266,14 @@ def _build_operation(raw: dict[str, Any], doc: str, base_reasons: list[str]) -> 
         examples=examples, source="llm", confidence=min(caps), reasons=reasons)
 
 
-def ingest_with_report(text: str, client: Any = None, model: str | None = None) -> tuple[dict[str, Any], list[str]]:
+def ingest_with_report(text: str, client: Any = None, model: str | None = None,
+                       strict: bool = False) -> tuple[dict[str, Any], list[str]]:
     """Return (draft spec, notes about operations that were left out of it)."""
     if not isinstance(text, str) or not text.strip():
         raise IngestError("the documentation text is empty")
     if client is None:
         client = _get_client()
-    data = _call_model(client, model or DEFAULT_MODEL, text)
+    data = _call_model(client, model or DEFAULT_MODEL, text, strict)
     ops_raw = data.get("operations")
     if not isinstance(ops_raw, list) or not ops_raw:
         raise IngestError("the model response has no `operations` list")
@@ -295,9 +318,11 @@ def ingest_with_report(text: str, client: Any = None, model: str | None = None) 
         auth["user_env"], auth["password_env"] = "API_USER", "API_PASSWORD"
     spec = make_spec(system_name=str(data.get("system_title") or "api"), base_url=base_url,
                      description=str(data.get("description") or ""), operations=operations, auth=auth)
+    spec["source"] = UNVERIFIED_SOURCE  # visible in the spec file itself and printed by the pipeline (D16)
     return spec, dropped
 
 
-def ingest(text: str, *, client: Any = None, model: str | None = None) -> dict[str, Any]:
-    """Pasted documentation text -> draft spec dict. See the module docstring for the checks applied."""
-    return ingest_with_report(text, client=client, model=model)[0]
+def ingest(text: str, *, client: Any = None, model: str | None = None, strict: bool = False) -> dict[str, Any]:
+    """Pasted documentation text -> draft spec dict. See the module docstring for the checks applied.
+    Raises DocNoToolCall (recoverable) when the model does not call the tool; retry once with strict=True."""
+    return ingest_with_report(text, client=client, model=model, strict=strict)[0]

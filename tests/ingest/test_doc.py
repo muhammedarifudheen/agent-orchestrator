@@ -142,13 +142,13 @@ def test_base_url_not_in_document_flags_every_op():
         assert any("base_url" in r for r in op["review_reasons"])
 
 
-def test_forced_tool_choice_and_document_sent():
+def test_auto_tool_choice_and_document_sent():
     stub = _stub("dogceo")
     text = _doc("dogceo")
     ingest(text, client=stub, model="claude-test-model")
     assert len(stub.calls) == 1
     call = stub.calls[0]
-    assert call["tool_choice"] == {"type": "tool", "name": "report_api"}
+    assert call["tool_choice"] == {"type": "auto"}  # D16: auto-first; the happy path is the tested path
     assert call["model"] == "claude-test-model"
     assert [t["name"] for t in call["tools"]] == [TOOL_NAME]
     assert text in call["messages"][0]["content"]

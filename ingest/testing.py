@@ -22,6 +22,11 @@ class _Messages:
 
     def create(self, **kwargs: Any) -> SimpleNamespace:
         self._owner.calls.append(kwargs)
+        if len(self._owner.calls) <= self._owner.text_first:  # the model "forgets" to call the tool
+            block = SimpleNamespace(type="text", text="Sure! I read the documentation; here is a summary...")
+            return SimpleNamespace(id="msg_stub_text", type="message", role="assistant", model=kwargs.get("model"),
+                                   content=[block], stop_reason="end_turn", stop_details=None,
+                                   usage=SimpleNamespace(input_tokens=0, output_tokens=0))
         block = SimpleNamespace(type="tool_use", id="toolu_stub_1", name=TOOL_NAME,
                                 input=copy.deepcopy(self._owner.canned))
         return SimpleNamespace(id="msg_stub_1", type="message", role="assistant", model=kwargs.get("model"),
@@ -30,9 +35,11 @@ class _Messages:
 
 
 class StubAnthropic:
-    def __init__(self, canned: dict[str, Any] | str | Path) -> None:
+    def __init__(self, canned: dict[str, Any] | str | Path, *, text_first: int = 0) -> None:
+        """``text_first=N``: the first N calls get a text-only reply (no tool_use block), then normal replies."""
         if isinstance(canned, (str, Path)):
             canned = json.loads(Path(canned).read_text(encoding="utf-8"))
         self.canned: dict[str, Any] = canned
         self.calls: list[dict[str, Any]] = []
+        self.text_first = text_first
         self.messages = _Messages(self)

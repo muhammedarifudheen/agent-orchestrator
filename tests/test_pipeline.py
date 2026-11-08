@@ -40,6 +40,8 @@ def test_undetectable_input_is_rejected(tmp_path, filename, content):
 
 # -- success path --------------------------------------------------------------------------------
 
+# BUDGET: spawns the pipeline's subprocess pytest gates (staged + promoted, 2 runs each): ~7-9 s normally; 30 s trips on a ~4x slowdown
+@pytest.mark.budget(30)
 def test_clean_read_spec_is_generated_verified_and_promoted(tmp_path):
     layout = layout_in(tmp_path)
     source = drop(layout.inbox, spec_with("pipeok", read_op("get_item"), read_op("get_other", path="/other/{item_id}")))
@@ -58,6 +60,7 @@ def test_clean_read_spec_is_generated_verified_and_promoted(tmp_path):
 
 # -- failures are reported, rolled back, never silent --------------------------------------------
 
+@pytest.mark.budget(15)
 def test_a_spec_whose_own_tests_fail_is_rolled_back_and_never_promoted(tmp_path):
     layout = layout_in(tmp_path)
     bad = make_operation(
@@ -122,6 +125,30 @@ def test_pending_ignores_dotfiles_reason_files_and_folders(tmp_path):
     (layout.inbox / "a.reason.txt").write_text("x", encoding="utf-8")
     (layout.inbox / "review").mkdir()
     assert [p.name for p in pending(layout, settle_s=0)] == ["a.yaml"]
+
+
+def test_pending_never_skips_a_file_whose_mtime_is_ahead_of_the_clock(tmp_path):
+    """Regression for the flaky gate (D17): the Windows clock ticks every ~15.6 ms, so a just-written file's mtime
+    is often AHEAD of time.time(). With settle_s=0 such a file must still be returned."""
+    import os
+    import time
+    layout = layout_in(tmp_path)
+    fresh = layout.inbox / "fresh.yaml"
+    fresh.write_text("x", encoding="utf-8")
+    future = time.time() + 0.5
+    os.utime(fresh, (future, future))
+    assert [p.name for p in pending(layout, settle_s=0)] == ["fresh.yaml"]
+
+
+def test_pending_settle_time_still_holds_back_files_that_are_still_arriving(tmp_path):
+    import os
+    import time
+    layout = layout_in(tmp_path)
+    old, new = layout.inbox / "old.yaml", layout.inbox / "new.yaml"
+    old.write_text("x", encoding="utf-8")
+    new.write_text("x", encoding="utf-8")
+    os.utime(old, (time.time() - 60, time.time() - 60))
+    assert [p.name for p in pending(layout, settle_s=5)] == ["old.yaml"]
 
 
 def test_watch_once_processes_everything_waiting(tmp_path):

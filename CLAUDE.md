@@ -115,11 +115,35 @@ implemented them. Change them here first, then in code.
   One flagged operation blocks the whole spec (the good operations are held too).
 - D16. Doc ingestion (`ingest/doc.py`, needs the Claude API) is the weakest link and is NOT verified
   against a real model: there was no `ANTHROPIC_API_KEY` when it was built, so it is tested with
-  `ingest/testing.StubAnthropic` only (wiring + the grounding checks, not extraction quality). Known risk:
-  the Claude API guidance says the current default model (`claude-sonnet-5-5`) rejects a FORCED
-  `tool_choice`; `doc.py` retries once with `auto` when the error mentions `tool_choice`, and that retry has
-  never run. Its grounding checks are string matches: they catch invented paths/params/quotes, not a real
-  path attached to the wrong method or meaning. Treat a doc-ingested spec as a draft to read, not to trust.
+  `ingest/testing.StubAnthropic` only (wiring + grounding checks, not extraction quality). Auto-first: it
+  makes ONE call with `tool_choice: auto` (a forced choice is rejected by the current default model, so
+  force-then-fallback would be "fail first, succeed second" on every run); a reply without the tool call is
+  an explicit, recoverable failure, `DocNoToolCall` (`DOC_NO_TOOL_CALL`, retryable, `recovery=agent`, an
+  `IngestError` carrying the same fields and text format as `ToolFailure`, because the ingestor is not an MCP
+  tool), never a silent fallback. The pipeline retries exactly once with a stricter prompt, reports the retry,
+  and fails with the code if the second reply also has no tool call. Every spec it produces carries
+  `source: doc-unverified` (top-level, allowed by the schema); the pipeline prints a one-line WARNING
+  whenever it handles one, including a human-edited draft, which keeps the marker. Its grounding checks are
+  string matches: they catch invented paths/params/quotes, not a real path attached to the wrong method.
+  Treat a doc-ingested spec as a draft to read, not to trust.
+- D17. The flaky gate, investigated. (1) The FAILURE had a root cause, now fixed: `pipeline.pending()` skipped
+  any inbox file whose mtime was ahead of `time.time()`. The Windows wall clock ticks every ~15.6 ms, so about 15%
+  of freshly written files (295 of 2000 measured) were skipped, `watch(once=True)` then processed nothing, and
+  tests that drop a file and call it failed at random. With `settle_s <= 0` there is now no age check
+  (regression test `test_pending_never_skips_a_file_whose_mtime_is_ahead_of_the_clock`, verified to fail on
+  the old code). The same bug could drop a file placed in `inbox/` just before `pipeline.py --once`.
+  (2) The SLOWNESS (one gate run took 164 s against ~16 s normally) did NOT reproduce: 20 consecutive runs of
+  the gate and gate-adjacent suite (101 tests each, 3 of them cold with every bytecode cache deleted) took a
+  median of 29.6 s, a maximum of 35.3 s, none above 3x the median, none failed. Ruled out by evidence: gate tests
+  using the network (an offline guard is installed in-process and in every subprocess the pipeline starts, and
+  never fired), a cold bytecode cache, and state shared between tests (all use `tmp_path`). Most likely cause,
+  a HYPOTHESIS and not proven: transient host contention (that run came right after three agents wrote dozens of
+  files, Defender real-time scanning is on, and every generation test starts four Python processes); the
+  cold-cache result argues against a pure file-scan explanation, so confidence is low. (3) So it can never be
+  shrugged off again: gate tests (`tests/conftest.py`, `GATE_MODULES`) must be offline and finish within 2 s;
+  the tests that run the pipeline's subprocess gates declare `@pytest.mark.budget(N)` (30 s, 15 s for the
+  one-subprocess rollback test) against ~7-9 s normally. A violation fails that test BY NAME with its duration.
+  `tests/test_gate_guard.py` tests the guards, and both were demonstrated firing.
 
 ## Architecture: genericity
 

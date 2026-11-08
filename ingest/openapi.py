@@ -176,8 +176,10 @@ def _base_url(doc: dict, source_name: str | None) -> str:
     if url and not re.match(r"^https?://", url) and source_name and re.match(r"^https?://", source_name):
         url = urljoin(source_name, url)
     if not url or not re.match(r"^https?://", url):
-        raise IngestError("no usable base_url: the document has no absolute servers[0].url (OpenAPI 3) or "
-                          f"host/basePath (Swagger 2); found {url!r}")
+        raise IngestError("no usable base_url: absolute URL required. The document has no absolute servers[0].url "
+                          f"(OpenAPI 3) or host/basePath (Swagger 2); found {url!r}. Nothing was generated. Fix: set "
+                          "servers[0].url to the full URL of the API (e.g. https://api.example.com/v1) in the "
+                          "document and drop it into inbox/ again.")
     return url.rstrip("/")
 
 

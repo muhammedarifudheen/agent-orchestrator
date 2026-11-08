@@ -30,6 +30,8 @@ GENERATED = [
 
 
 @pytest.mark.parametrize("fixture,kind,name,tools,stub", GENERATED, ids=[g[1] for g in GENERATED])
+# BUDGET: spawns the pipeline's subprocess pytest gates (staged + promoted, 2 runs each): ~7-9 s normally; 30 s trips on a ~4x slowdown
+@pytest.mark.budget(30)
 def test_fixture_is_ingested_generated_verified_and_matches_the_committed_spec(tmp_path, fixture, kind, name, tools, stub):
     layout = layout_in(tmp_path)
     shutil.copy2(FIX / fixture, layout.inbox / fixture)

@@ -1,6 +1,10 @@
 """Shared fixtures for tests that run the orchestrator against real in-memory MCP servers."""
 from __future__ import annotations
 
+import sys
+import time
+from pathlib import Path
+
 import pytest
 
 import retail_server
@@ -29,3 +33,41 @@ def card_declined():
     yield
     retail_server.mcp.remove_tool("charge_payment")
     retail_server.mcp.add_tool(original, name="charge_payment")
+
+
+# -- gate tests: offline and time-boxed (D17) ------------------------------------------------------------
+sys.path.insert(0, str(Path(__file__).parent.parent / "offline_guard"))
+import guard  # noqa: E402  (offline_guard/guard.py)
+
+GATE_MODULES = {"test_review_gate", "test_pipeline", "test_pipeline_fixtures", "test_pipeline_relative_url",
+                "test_doc_unverified"}
+DEFAULT_BUDGET_S = 2.0
+
+
+def budget_violation(nodeid: str, elapsed: float, budget: float) -> str | None:
+    """The failure message when a gate test overran its budget, else None. Names the test and the duration."""
+    if elapsed <= budget:
+        return None
+    return (f"GATE TEST TOO SLOW: {nodeid} took {elapsed:.1f}s (budget {budget:g}s). A gate test that stalls usually "
+            "waited on a network call, a subprocess or a retry: find out which before raising the budget (CLAUDE.md D17).")
+
+
+@pytest.fixture(autouse=True)
+def gate_guard(request):
+    """Gate tests may not touch the network and may not exceed their time budget (2 s unless they carry
+    @pytest.mark.budget(N), which only tests that run the pipeline's subprocess gates may do).
+    A leak or a stall fails the test BY NAME instead of being absorbed as a slow run."""
+    if request.module.__name__.split(".")[-1] not in GATE_MODULES:
+        yield
+        return
+    marker = request.node.get_closest_marker("budget")
+    budget = float(marker.args[0]) if marker else DEFAULT_BUDGET_S
+    uninstall = guard.install()
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        uninstall()
+    message = budget_violation(request.node.nodeid, time.perf_counter() - started, budget)
+    if message:
+        pytest.fail(message, pytrace=False)
