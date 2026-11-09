@@ -13,7 +13,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from agent.tool_registry import ToolRegistry
+from agent.tool_registry import SEP, ToolRegistry
 
 DEFAULT_MODEL = os.environ.get("AGENT_MODEL", "claude-sonnet-5-5")
 
@@ -22,7 +22,7 @@ only the provided tools; you have no other way to act on external systems.
 Today's date is {today}. Resolve relative dates ("tomorrow") against it.
 Rules:
 - Read each tool's description carefully, including argument formats and error codes.
-- Plan, then call tools in a sensible order, using earlier results as inputs to later calls.
+- Plan, then call tools in a sensible sequence, using earlier results as inputs to later calls.
 - A failed tool call says `recovery=agent` or `recovery=human`. With `recovery=agent` you get ONE \
 chance to fix it (correct the arguments, look an id up again, or retry once if it says retryable=true); \
 a second failure of the same tool ends the run. With `recovery=human` stop calling tools and say \
@@ -93,6 +93,11 @@ class Handoff:
     agent_last_message: str
     steps: list[dict[str, Any]]  # structured decision log: thought, tool, args, result per call
     decision_log: list[str]  # the same run as human-readable lines
+    # Cross-system context (D19). An "industry" is the part of the qualified tool name before SEP, i.e. the server
+    # that owns the tool: the orchestrator never knows what any of them mean.
+    industries_touched: list[str] = field(default_factory=list)  # in sequence of first touch, incl. the failing one
+    tools_called_by_industry: dict[str, list[str]] = field(default_factory=dict)  # executed calls only, in call sequence
+    failure_industry: str | None = None  # industry of the triggering failure (None: no tool failure fired it)
 
     def to_text(self) -> str:
         lines = ["=" * 70, "HUMAN HANDOFF REQUIRED", "=" * 70,
@@ -111,7 +116,9 @@ class Handoff:
                 lines.append(f"  {o['tool']} -> {json.dumps(o['result'], default=str)}")
         else:
             lines.append("  (nothing completed)")
-        lines += ["", f"Agent's last message: {self.agent_last_message or '(none)'}", "=" * 70]
+        lines += ["", f"Industries touched: {', '.join(self.industries_touched) or '(none)'}"
+                  f" | failure in: {self.failure_industry or '(no tool failure)'}",
+                  f"Agent's last message: {self.agent_last_message or '(none)'}", "=" * 70]
         return "\n".join(lines)
 
 
@@ -270,9 +277,16 @@ class Orchestrator:
         m = re.search(r"(?ms)^\s*Args:\s*\n(.*?)(?:\n\s*\n|\Z)", tool_def.get("description") or "")
         return summary + ("\n" + m.group(1).rstrip() if m else "")
 
+    @staticmethod
+    def _industry(tool: str) -> str:
+        return tool.partition(SEP)[0]
+
     def _escalate(self, state: ExecutionState, reason: str, last_text: str,
                   trigger: Operation | None = None) -> RunResult:
         """Build the full-context handoff. Never drops information; always surfaces the failure."""
+        by_industry: dict[str, list[str]] = {}
+        for o in state.operations:  # state.operations holds executed calls only; skipped ones live in state.skipped
+            by_industry.setdefault(self._industry(o.tool), []).append(o.tool)
         handoff = Handoff(
             reason=reason, goal=state.goal, user=self.user_id,
             created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -307,6 +321,9 @@ class Orchestrator:
                                                      "http_status": o.http_status}}
                    for o in state.operations],
             decision_log=list(state.log),
+            industries_touched=list(by_industry),
+            tools_called_by_industry=by_industry,
+            failure_industry=None if trigger is None else self._industry(trigger.tool),
         )
         self._log(state, f"HANDOFF: {reason}")
         if self.handoff_dir is not None:

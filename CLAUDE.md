@@ -181,6 +181,27 @@ implemented them. Change them here first, then in code.
   `add_error_code` meaning text is a placeholder for the reviewer to reword.
   Gate guard: `tests/test_gate_guard.py` now searches `tests/` recursively for the `GATE_MODULES` files (the learning
   tests live in `tests/learning/`); the fail-on-typo check is retained.
+- D19. Cross-industry orchestration. (1) The orchestrator has no industry knowledge, and this is enforced, not
+  claimed: `tests/test_orchestrator_generality.py` scans `agent/*.py` for the brief's words (travel, retail, banking,
+  weather, flight, kyc, order) PLUS every server name and every tool name the registry discovers, and fails on any
+  hit (`ALLOWED_HITS` is empty; the only hits it ever found were my own prose: "sensible order" in the system prompt
+  and "first-touch order" in two comments, reworded to "sequence", not whitelisted). It also drives every tool of every
+  registered server through the real Orchestrator with a stub plan (parametrized over all 8 servers) and runs a brand-new
+  throwaway industry ("aquarium", written at test time) with zero orchestrator changes, success and failure. (2) An
+  "industry" is the part of a qualified tool name before `__`, nothing more. The handoff JSON gained
+  `industries_touched` (first-touch sequence, including the failing one), `tools_called_by_industry` (executed calls
+  only; skipped calls stay in `current_state.skipped_operations`) and `failure_industry` (null when no tool failure
+  fired the handoff), next to `http_status`. `collect.py` needed no change: it tags a record with the system of the
+  failing tool, so a banking failure after a completed travel booking is a `banking` record (tested). (3) The scenario
+  (`scenarios/cross_industry.yaml`: find/book/confirm a flight, confirm KYC, check balance, transfer, check stock, order,
+  pay, ship) is written as intents with no tool names; `tests/scenarios/intent_llm.py` stands in for the model by
+  scoring intent text against the tool descriptions it is offered. THIS STUB IS A TUNED KEYWORD MATCHER, NOT A MODEL:
+  its weights (name x3, verb x1.5, rarity-weighted) were adjusted until all 10 intents mapped correctly (a first draft
+  sent "transfer money" to the balance tool), and rewording an intent can break the mapping. What the scenario proves is
+  that the orchestrator and registry carry state across industries and hand off with the full cross-industry context;
+  it does NOT prove that a real model picks the right tool. The failure is a real fault inside a real tool
+  (`BANKING_FAIL_MODE=core_down`, `TRAVEL_FAIL_MODE=all_down`), never a patched handoff. Only banking and travel
+  outages are injected; retail's `payment_down` and non-outage failures (declines, KYC rejection) are not covered here.
 
 ## Architecture: genericity
 

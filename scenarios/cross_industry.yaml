@@ -1,0 +1,103 @@
+name: trip_kyc_gear
+goal: "I need to fly from Delhi to Mumbai about a month from now. Please find a flight and book it for Asha Verma (asha.verma@example.com), then email her the booking confirmation. Before I pay for anything, check that bank customer CUST-TEST-0001 is identity-verified, and then move 4200.00 from account ACCT-TEST-0001 to account ACCT-TEST-0003 to cover the cost of some travel gear. Finally, make sure two USB-C cables (SKU-1004) are in stock, order them for retail customer C-1001, pay for the order and ship it to 221 Park Street, Mumbai 400001."
+facts:
+  origin: DEL
+  destination: BOM
+  date: {days_from_today: 30}
+  passenger_name: Asha Verma
+  passenger_email: asha.verma@example.com
+  customer_id: CUST-TEST-0001
+  from_acct: ACCT-TEST-0001
+  to_acct: ACCT-TEST-0003
+  amount: 4200.00
+  sku: SKU-1004
+  qty: 2
+  address: "221 Park Street, Mumbai 400001"
+  retail_customer_id: C-1001
+intents:
+  - id: find_flight
+    industry: travel
+    intent: "look up available flights between two airports on a given date"
+    uses: [origin, destination, date]
+    consumes: []
+    side_effect: read
+  - id: book_flight_for_passenger
+    industry: travel
+    intent: "book a seat for the passenger on the chosen flight"
+    uses: [passenger_name, passenger_email]
+    consumes: [find_flight]
+    side_effect: write
+  - id: email_booking_confirmation
+    industry: travel
+    intent: "send the passenger a confirmation email for the booking"
+    uses: [passenger_email]
+    consumes: [book_flight_for_passenger]
+    side_effect: write
+  - id: confirm_customer_identity
+    industry: banking
+    intent: "confirm the bank customer's identity / KYC status and list their accounts"
+    uses: [customer_id]
+    consumes: []
+    side_effect: read
+  - id: check_source_balance
+    industry: banking
+    intent: "get the account balance and status of the account the money will come from"
+    uses: [from_acct]
+    consumes: [confirm_customer_identity]
+    side_effect: read
+  - id: transfer_money_for_gear
+    industry: banking
+    intent: "transfer money from the customer's account to another account to pay for the gear"
+    uses: [from_acct, to_acct, amount]
+    consumes: [confirm_customer_identity, check_source_balance]
+    side_effect: money
+  - id: check_gear_stock
+    industry: retail
+    intent: "check stock / inventory and price of a product for a quantity"
+    uses: [sku, qty]
+    consumes: []
+    side_effect: read
+  - id: place_gear_order
+    industry: retail
+    intent: "place an order for the product for the retail customer, reserving the stock"
+    uses: [sku, qty, retail_customer_id]
+    consumes: [check_gear_stock]
+    side_effect: write
+  - id: pay_for_order
+    industry: retail
+    intent: "charge the customer's payment for the order total"
+    uses: []
+    consumes: [place_gear_order]
+    side_effect: money
+  - id: ship_order
+    industry: retail
+    intent: "create a shipment of the paid order to a delivery address"
+    uses: [address]
+    consumes: [pay_for_order]
+    side_effect: write
+order_constraints:
+  - [find_flight, book_flight_for_passenger]
+  - [book_flight_for_passenger, email_booking_confirmation]
+  - [confirm_customer_identity, check_source_balance]
+  - [confirm_customer_identity, transfer_money_for_gear]
+  - [check_source_balance, transfer_money_for_gear]
+  - [email_booking_confirmation, confirm_customer_identity]
+  - [transfer_money_for_gear, place_gear_order]
+  - [check_gear_stock, place_gear_order]
+  - [place_gear_order, pay_for_order]
+  - [pay_for_order, ship_order]
+expected_industries_in_order: [travel, banking, retail]
+success_checks:
+  - {industry: travel, description: "a booking exists for the passenger with status CONFIRMED"}
+  - {industry: travel, description: "a confirmation email was accepted for that booking"}
+  - {industry: banking, description: "the customer's KYC status is VERIFIED"}
+  - {industry: banking, description: "a transfer of 4200.00 from the source account to the destination account is COMPLETED"}
+  - {industry: retail, description: "an order for 2 units exists and is paid"}
+  - {industry: retail, description: "a shipment exists for the order and the order status is SHIPPED"}
+failure_injection:
+  industry: banking
+  at_intent: confirm_customer_identity
+  env: {BANKING_FAIL_MODE: core_down}
+  expect:
+    failure_industry: banking
+    industries_touched: [travel, banking]
