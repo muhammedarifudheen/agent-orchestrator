@@ -65,6 +65,10 @@ class ExecutionState:
     agent_failures: dict[str, int] = field(default_factory=dict)  # tool -> recovery=agent failures since its last success
     steps: int = 0
     skipped: list[dict[str, Any]] = field(default_factory=list)  # calls not run because of a handoff
+    # Set ONLY by the recovery=human branch of the policy (D18): observable proof that the branch ran, independent of
+    # the wording of the handoff reason and of the unknown-recovery fail-safe, which also stops at once.
+    human_required: bool = False
+    agent_recovery_skipped: bool = False  # the failure said a person is needed, so no agent retry/self-correction was offered
 
     def note(self, line: str) -> None:
         self.log.append(line)
@@ -98,6 +102,9 @@ class Handoff:
     industries_touched: list[str] = field(default_factory=list)  # in sequence of first touch, incl. the failing one
     tools_called_by_industry: dict[str, list[str]] = field(default_factory=dict)  # executed calls only, in call sequence
     failure_industry: str | None = None  # industry of the triggering failure (None: no tool failure fired it)
+    # Present in the JSON ONLY when the recovery=human branch fired; omitted otherwise (see _handoff_json).
+    human_required: bool | None = None
+    agent_recovery_skipped: bool | None = None
 
     def to_text(self) -> str:
         lines = ["=" * 70, "HUMAN HANDOFF REQUIRED", "=" * 70,
@@ -248,6 +255,8 @@ class Orchestrator:
             return None
         where = f"[{op.error_code}] from {op.tool}: {op.error_message}"
         if op.recovery == "human":
+            state.human_required = True
+            state.agent_recovery_skipped = True
             return f"Human required {where} (recovery=human)."
         if op.recovery != "agent":
             return f"Human required {where} (error did not state a recovery path; failing safe)."
@@ -276,6 +285,16 @@ class Orchestrator:
                             for n, p in (schema.get("properties") or {}).items()) or "(none)"
         m = re.search(r"(?ms)^\s*Args:\s*\n(.*?)(?:\n\s*\n|\Z)", tool_def.get("description") or "")
         return summary + ("\n" + m.group(1).rstrip() if m else "")
+
+    @staticmethod
+    def _handoff_json(handoff: Handoff) -> dict[str, Any]:
+        """The handoff as written to disk: the two recovery=human flags are omitted unless they are true, so their
+        PRESENCE means something (a handoff caused by a retryable/agent failure never carries them)."""
+        data = asdict(handoff)
+        for key in ("human_required", "agent_recovery_skipped"):
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
 
     @staticmethod
     def _industry(tool: str) -> str:
@@ -324,6 +343,8 @@ class Orchestrator:
             industries_touched=list(by_industry),
             tools_called_by_industry=by_industry,
             failure_industry=None if trigger is None else self._industry(trigger.tool),
+            human_required=True if state.human_required else None,
+            agent_recovery_skipped=True if state.agent_recovery_skipped else None,
         )
         self._log(state, f"HANDOFF: {reason}")
         if self.handoff_dir is not None:
@@ -333,7 +354,7 @@ class Orchestrator:
             while path.exists():  # two handoffs in the same second must not overwrite each other
                 n += 1
                 path = self.handoff_dir / f"{stem}_{n}.json"
-            path.write_text(json.dumps(asdict(handoff), indent=2, default=str), encoding="utf-8")
+            path.write_text(json.dumps(self._handoff_json(handoff), indent=2, default=str), encoding="utf-8")
             self._log(state, f"Handoff snapshot saved to {path}")
         return RunResult(False, last_text, state, handoff)
 

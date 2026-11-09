@@ -10,9 +10,12 @@ only for idempotent operations; otherwise ``OUTCOME_UNKNOWN`` (not retryable).
 """
 from __future__ import annotations
 
+import atexit
+import http.cookiejar
 import json
 import os
 import re
+import threading
 from typing import Any
 from urllib.parse import quote
 
@@ -21,6 +24,49 @@ import httpx
 from _base import ToolFailure, auth_from_env, standard_http_error, unknown_outcome
 
 _MISSING = object()
+
+# -- per-process client pool -----------------------------------------------------------------------
+# A new httpx.Client per request built a TLS/SSL context every time (~0.3 s on the build machine). Clients are now
+# shared per (base URL, timeout, auth kind, transport) for the life of the process (D17).
+#   * Auth never lives on a pooled client: credentials are put on each REQUEST (headers/query), the client has no
+#     default headers, no auth object and NO cookie jar contents (cookies are refused below), so nothing one call
+#     learns can leak into another, and `auth kind` is in the key anyway so incompatible contexts never share one.
+#   * Timeouts stay per request (`client.request(..., timeout=)`); they are in the key only so a different timeout is a
+#     different client rather than a surprise.
+#   * `transport` (tests inject fakes, and may swap it between calls) is part of the key BY IDENTITY and the pool keeps a
+#     reference to it, so an id can never be recycled into a stale client.
+_POOL: dict[tuple, httpx.Client] = {}
+_POOL_LOCK = threading.Lock()
+
+
+def _new_client(transport: httpx.BaseTransport | None, timeout: float) -> httpx.Client:
+    client = httpx.Client(transport=transport, timeout=timeout)
+    client.cookies.jar.set_policy(http.cookiejar.DefaultCookiePolicy(allowed_domains=[]))  # accept no cookies, ever
+    return client
+
+
+def get_client(base_url: str, timeout: float, auth_kind: str, transport: httpx.BaseTransport | None) -> httpx.Client:
+    key = (base_url, timeout, auth_kind, transport)
+    with _POOL_LOCK:
+        client = _POOL.get(key)
+        if client is None:
+            client = _POOL[key] = _new_client(transport, timeout)
+        return client
+
+
+def close_pool() -> None:
+    """Close and forget every pooled client (process exit; tests call it between cases)."""
+    with _POOL_LOCK:
+        clients = list(_POOL.values())
+        _POOL.clear()
+    for client in clients:
+        try:
+            client.close()
+        except Exception:  # closing is best effort
+            pass
+
+
+atexit.register(close_pool)
 
 
 def get_path(obj: Any, path: str) -> Any:
@@ -92,8 +138,11 @@ class HttpClient:
                 raise ToolFailure("INVALID_ARGUMENT", f"'{name}' {problem} (got {value!r}).",
                                   retryable=False, recovery="agent")
 
+    def _base_url(self) -> str:
+        return (os.environ.get(self.system.get("base_url_env") or "") or self.system["base_url"]).rstrip("/")
+
     def _build(self, op: dict[str, Any], args: dict[str, Any]) -> tuple[str, dict, dict, Any]:
-        base = (os.environ.get(self.system.get("base_url_env") or "") or self.system["base_url"]).rstrip("/")
+        base = self._base_url()
         path, query, headers, body = op["path"], dict(op.get("query_const") or {}), {}, {}
         for p in op["params"]:
             value = args.get(p["name"])
@@ -125,8 +174,10 @@ class HttpClient:
         headers.update(auth.headers)
         query.update(auth.query)
         try:
-            with httpx.Client(transport=self.transport, timeout=self.system.get("timeout_s", 10)) as client:
-                resp = client.request(op["method"], url, params=query or None, headers=headers, json=body)
+            timeout = self.system.get("timeout_s", 10)
+            client = get_client(self._base_url(), timeout, (self.system.get("auth") or {}).get("kind", "none"),
+                                self.transport)
+            resp = client.request(op["method"], url, params=query or None, headers=headers, json=body, timeout=timeout)
         except (httpx.ConnectTimeout, httpx.PoolTimeout) as exc:  # never left this machine
             raise ToolFailure("TIMEOUT", f"Could not connect in time ({type(exc).__name__}).",
                             retryable=True, recovery="agent") from exc

@@ -18,6 +18,12 @@ from learning.apply import apply_approved, waiting
 from learning.patchfmt import make_proposal, sha256_bytes
 from pipeline_helpers import layout_in
 
+# BUDGET (D17): every test here copies a git repo and runs several `git` subprocesses (rev-list, status, commit). Quiet
+# cost is ~0.2-0.3 s; under load the same tests were seen at 2.0-3.5 s once in five full runs (not reproducible on
+# demand). 10 s is ~40x the quiet time, so a real stall or hang still fails by name; the tests that also run the
+# pipeline's pytest gates keep their own, larger @pytest.mark.budget(30) (the closest marker wins).
+pytestmark = pytest.mark.budget(10)
+
 NEW_RULE = ('      - {when: {status: 404}, code: NOT_FOUND, retryable: false, recovery: agent, '
             'meaning: "No weather data for these coordinates"}\n')
 ANCHOR = 'meaning: "Coordinates were rejected by the weather service"}\n'

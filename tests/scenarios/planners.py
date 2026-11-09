@@ -8,7 +8,7 @@ results (a flight id exists only after the search), so the executor (`intent_llm
 
 Two implementations:
   * KeywordPlanner  - deterministic keyword matcher (see intent_llm.choose_tool). Default. No key. Not a model.
-  * ClaudePlanner   - asks a real Claude model. Opt-in: ANTHROPIC_API_KEY and LIVE_TESTS=1. Never run by default.
+  * ClaudePlanner   - asks a real Claude model (plain-HTTP client, no SDK). Opt-in: ANTHROPIC_API_KEY and LIVE_TESTS=1.
 
 Both must pass the SAME contract (tests/scenarios/test_planner_contract.py); there is no looser version for either.
 A planner sees only plain-words intents (id, text, consumes) and the offered tool definitions: no industry labels,
@@ -68,9 +68,18 @@ SYSTEM = ("You plan tool use for an agent. For EVERY intent choose exactly ONE t
           "calling the submit_plan tool: no prose, no questions.")
 
 
+STRICT_SUFFIX = ("\nIMPORTANT: your previous reply did not call submit_plan. Reply ONLY by calling the submit_plan "
+                 "tool. No prose, no questions; if you are unsure, still submit your best plan.")
+
+
 class ClaudePlanner:
-    """Real-model planner. `client` is injectable so the wiring is testable without a key (tests use a fake client);
-    the CONTRACT for this planner only runs against the real API, and is skipped with a reason otherwise."""
+    """Real-model planner over the Messages API (anthropic_http.AnthropicHTTP, no SDK). `client` is injectable; tests
+    pass one backed by FakeAnthropicTransport, which verifies the wiring only. The CONTRACT for this planner runs
+    against the real API alone and is SKIPPED, with a reason, when no key is present.
+
+    A reply without the tool call is retried EXACTLY ONCE with a stricter prompt (auto-first, like D16: a forced
+    tool_choice is rejected by the current default model); a second miss raises PLANNER_NO_TOOL_CALL. API errors are
+    never retried here. No fallback to another planner, ever."""
 
     name = "claude"
 
@@ -78,26 +87,32 @@ class ClaudePlanner:
         self._client = client
         self._model = model or os.environ.get("AGENT_MODEL", "claude-sonnet-5-5")
 
-    def plan(self, intents: Sequence[dict], tools: Sequence[dict]) -> list[PlannedCall]:
-        client = self._client
-        if client is None:
-            import anthropic  # imported lazily: the default (keyword) path must not need the SDK or a key
-            client = anthropic.Anthropic()
-        payload = {"intents": [{"id": i["id"], "intent": i["intent"], "consumes": i.get("consumes") or []}
-                               for i in intents],
-                   "tools": [{"name": t["name"], "description": t.get("description", "")} for t in tools]}
+    def _ask(self, client: Any, payload: dict[str, Any], strict: bool) -> Any:
         try:
             resp = client.messages.create(
-                model=self._model, max_tokens=4000, system=SYSTEM, tools=[SUBMIT_PLAN],
-                tool_choice={"type": "auto"},  # a forced choice is rejected by the current default model (D16)
+                model=self._model, max_tokens=4000, system=SYSTEM + (STRICT_SUFFIX if strict else ""),
+                tools=[SUBMIT_PLAN], tool_choice={"type": "auto"},
                 messages=[{"role": "user", "content": json.dumps(payload)}])
         except Exception as exc:
             raise PlannerError(f"PLANNER_API_FAILED: {type(exc).__name__}: {exc}") from exc
         block = next((b for b in resp.content if getattr(b, "type", None) == "tool_use"
                       and getattr(b, "name", None) == "submit_plan"), None)
+        return block, getattr(resp, "stop_reason", None)
+
+    def plan(self, intents: Sequence[dict], tools: Sequence[dict]) -> list[PlannedCall]:
+        client = self._client
+        if client is None:
+            from anthropic_http import AnthropicHTTP  # lazy: building the keyword planner needs no key
+            client = AnthropicHTTP()
+        payload = {"intents": [{"id": i["id"], "intent": i["intent"], "consumes": i.get("consumes") or []}
+                               for i in intents],
+                   "tools": [{"name": t["name"], "description": t.get("description", "")} for t in tools]}
+        block, stop = self._ask(client, payload, strict=False)
+        if block is None:  # the one visible retry
+            block, stop = self._ask(client, payload, strict=True)
         if block is None:
-            raise PlannerError("PLANNER_NO_TOOL_CALL: the model did not call submit_plan "
-                               f"(stop_reason={getattr(resp, 'stop_reason', None)!r})")
+            raise PlannerError("PLANNER_NO_TOOL_CALL: the model did not call submit_plan, even after one retry with "
+                               f"a stricter prompt (stop_reason={stop!r})")
         calls = (block.input or {}).get("calls")
         if not isinstance(calls, list) or not all(isinstance(c, dict) and isinstance(c.get("intent_id"), str)
                                                   and isinstance(c.get("tool"), str) for c in calls):

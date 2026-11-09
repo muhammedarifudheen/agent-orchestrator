@@ -126,7 +126,9 @@ implemented them. Change them here first, then in code.
   `source: doc-unverified` (top-level, allowed by the schema); the pipeline prints a one-line WARNING
   whenever it handles one, including a human-edited draft, which keeps the marker. Its grounding checks are
   string matches: they catch invented paths/params/quotes, not a real path attached to the wrong method.
-  Treat a doc-ingested spec as a draft to read, not to trust.
+  Treat a doc-ingested spec as a draft to read, not to trust. Environment note: on the build machine `import anthropic`
+  fails (its `jiter` DLL is blocked by a Windows Application Control policy), so doc ingestion cannot run there even with
+  a key; the planner in D20 avoids the SDK with a plain-HTTP client, and doing the same for `ingest/doc.py` is open.
 - D17. The flaky gate, investigated. (1) The FAILURE had a root cause, now fixed: `pipeline.pending()` skipped
   any inbox file whose mtime was ahead of `time.time()`. The Windows wall clock ticks every ~15.6 ms, so about 15%
   of freshly written files (295 of 2000 measured) were skipped, `watch(once=True)` then processed nothing, and
@@ -162,8 +164,26 @@ implemented them. Change them here first, then in code.
   to its own server and gives HTTP servers a stub 503 upstream (10.2 s -> 0.4 s; before that it tripped the 2 s budget
   twice in a loaded run). Still scaling with repo size, by design: `test_import.py` (2 subprocesses per server: that is
   what it verifies) and the pipeline/apply gates (constant per test, ~4 subprocesses). After the fix, two consecutive full
-  runs took 110 s and 109 s. Not fixed: `servers/_http.py` builds a new `httpx.Client` (and SSL context) on every call,
-  ~0.3 s of avoidable latency per real request; it is runtime code, out of scope here, noted for a later package.
+  runs took 110 s and 109 s. FIXED, not deferred: `servers/_http.py` built a new `httpx.Client` (and SSL context) on every
+  call, ~0.3 s of avoidable latency per real request. It now keeps a per-process pool keyed by (base URL, timeout, auth
+  kind, transport) (`get_client`, `close_pool`); credentials are put on each request, never on the client, the client's
+  cookie policy refuses every cookie (so no session state crosses calls), and the timeout is still passed per request.
+  The only `httpx.Client(` construction left in the runtime is the pool's factory (an AST test checks that);
+  `tests/test_http_pool.py` proves reuse (two calls, one instantiation), a new client for another base URL / timeout /
+  auth kind / transport, no cookie or credential carry-over, and that a failed request does not poison the pooled client.
+  `tests/conftest.py` empties the pool around every test. (Dropping the per-request `timeout=` is not caught by a test:
+  the pooled client is already built with the same timeout, so it is a redundant safeguard, not separately observable.)
+  A budget I had to raise, and why: in one of five full runs, three fast `tests/learning/test_apply.py` tests (copy a git
+  repo, run a handful of `git` subprocesses; 0.2-0.3 s quiet, measured three times) took 2.0-3.5 s and the 2 s guard failed
+  them by name. It did not reproduce on demand, so the cause is NOT proven (the only evidence is the size of the spike and
+  that the work is file- and process-heavy); the module now carries `pytestmark = budget(10)`, ~40x the quiet time, so a
+  real hang still fails. The capture below is what will say more the next time.
+  Slow-run duration capture is automatic going forward (`tests/perf_capture.py`, hooks in `tests/conftest.py`): after every
+  run of >= 50 tests the wall time is compared with the median of the last 5 comparable runs (test count within
+  0.8x-1.25x); above 2x that median (and with >= 3 prior runs), a `--durations=50`-style report is written to
+  `.perf/last_slow_run.txt` and kept until the next slow run; `.perf/median.txt` holds the median of the last 5 runs and
+  `.perf/history.json` the last 20. It is a diagnostic: it cannot fail or slow a run (every error is swallowed with one
+  printed line), partial runs are ignored, and synthetic tests show the report appears on a slow run and not on a normal one.
 - D18. Failure-driven learning loop (`learning/`). An unrecoverable failure becomes a CANDIDATE spec correction that
   a person approves; nothing is ever auto-applied. Flow: `collect.py` (handoffs/*.json -> `learning/failures.jsonl`,
   one record per (system, operation, code) per 24h window with a `recurrence` count; it keeps parameter TYPES, never
@@ -200,6 +220,11 @@ implemented them. Change them here first, then in code.
   `add_error_code` meaning text is a placeholder for the reviewer to reword.
   Gate guard: `tests/test_gate_guard.py` now searches `tests/` recursively for the `GATE_MODULES` files (the learning
   tests live in `tests/learning/`); the fail-on-typo check is retained.
+  recovery=human is observable via `human_required` + `agent_recovery_skipped`, not just reason text: the recovery=human
+  branch of the policy sets both on the execution state (a side effect nothing else produces), and the handoff JSON carries
+  them (`true`) ONLY then; for every other cause (recovery=agent retries, the unknown-recovery fail-safe, step limit) the two
+  keys are ABSENT, not false or null. A mutation that disables the branch now fails on the field assertions even with the
+  reason-text assertion removed (the fail-safe path stops at once too, so behaviour alone could not tell them apart).
 - D19. Cross-industry orchestration. (1) The orchestrator has no industry knowledge, and this is enforced, not
   claimed: `tests/test_orchestrator_generality.py` scans `agent/*.py` for the brief's words (travel, retail, banking,
   weather, flight, kyc, order) PLUS every server name and every tool name the registry discovers, and fails on any
@@ -234,15 +259,27 @@ implemented them. Change them here first, then in code.
   `LIVE_TESTS=1`; otherwise it is SKIPPED with the reason ("ANTHROPIC_API_KEY absent"), never passed. The checks
   themselves are shown to fail on bad plans (one industry, a ghost tool, book-before-search, a dropped intent, the wrong
   industry). `test_planner_wiring.py` tests ClaudePlanner's request and parsing with an injected fake client; that is
-  wiring, not the contract, and says nothing about whether a real model plans well. STATUS: the Claude half has NEVER
-  RUN (no key on this machine); only the keyword half is evidenced. `test_cross_industry_planners.py` runs the success path
+  wiring, not the contract, and says nothing about whether a real model plans well. STATUS: the real-model planner has NEVER
+  RUN (no key on this machine); only the keyword half is evidenced for choosing tools. FakeAnthropicTransport exercises the
+  wire format, NOT model judgment. The real-model planner remains SKIPPED without ANTHROPIC_API_KEY.
+  What is verified without a key ("wiring verified", never "judgment verified"): `tests/scenarios/anthropic_http.py` is a
+  small Messages-API client over plain httpx (no SDK), and `tests/scenarios/fake_anthropic.py` is an httpx transport that
+  plays the API with realistic response shapes (modelled on the published format, NOT captured from a live call). Through
+  them `test_planner_wiring.py` proves: (i) the request body carries the submit_plan tool with its exact schema, the whole
+  tool registry (names and descriptions), `tool_choice: auto`, and neither facts nor the key; (ii) a valid tool_use reply
+  parses to PlannedCalls; (iii) a reply with no tool use raises `PlannerError("PLANNER_NO_TOOL_CALL ...")` (a planner
+  error, not a ToolFailure, for the same reason as D16; named after DOC_NO_TOOL_CALL); (iv) the auto-first retry fires
+  exactly once (a stricter system prompt, still `auto`), succeeds if the second reply is good, and the second miss raises
+  after exactly two requests. Mutations (no retry, forced tool_choice, a third request) are caught. The SDK is not used
+  because on this machine `import anthropic` fails (its `jiter` DLL is blocked by a Windows Application Control policy;
+  not worked around), which also means `ingest/doc.py`, which imports the SDK, could not run here even with a key. `test_cross_industry_planners.py` runs the success path
   and the banking outage with each planner, same opt-in. Retail coverage (`test_retail_failures.py`): payment gateway
   down (retryable, recovery=agent) is retried once and then handed off as `failure_industry=retail` with the completed
   retail steps listed; a declined card (`CARD_DECLINED`, recovery=human, http_status=402, injected with
   `tests/scenarios/inject.py`, which restores the tool's annotations, unlike the older `card_declined` conftest fixture
   that drops them) hands off with ZERO retries (the server saw the charge once, `agent_failures` is empty); a mutation
-  that disabled the recovery=human branch was caught (by the handoff reason text, because the fail-safe path also stops
-  at once), and the declined handoff reaches `collect.py` with `status: 402`.
+  that disabled the recovery=human branch is caught by the `human_required` / `agent_recovery_skipped` assertions (D18), and
+  the declined handoff reaches `collect.py` with `status: 402`.
 
 ## Architecture: genericity
 

@@ -10,3 +10,6 @@ learning/failures.jsonl
 proposals/*.patch
 proposals/*/*.patch
 proposals/*/*.reason.txt
+
+# slow-run capture (tests/perf_capture.py)
+.perf/

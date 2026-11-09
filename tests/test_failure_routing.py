@@ -91,6 +91,40 @@ async def run(outcomes, **kw):
     return result, llm
 
 
+class HumanFlagsTests(unittest.IsolatedAsyncioTestCase):
+    """human_required / agent_recovery_skipped are written ONLY when the recovery=human branch fired (D18)."""
+
+    async def test_recovery_human_sets_both_flags(self):
+        result, _ = await run([declined()])
+        self.assertIs(result.handoff.human_required, True)
+        self.assertIs(result.handoff.agent_recovery_skipped, True)
+        self.assertIs(result.state.human_required, True)
+
+    async def test_the_fail_safe_for_an_unknown_recovery_stops_at_once_but_sets_neither_flag(self):
+        result, _ = await run([no_contract()])
+        self.assertIn("failing safe", result.handoff.reason)
+        self.assertIsNone(result.handoff.human_required)
+        self.assertIsNone(result.handoff.agent_recovery_skipped)
+
+    async def test_agent_recovery_paths_set_neither_flag(self):
+        for outcomes in ([transient("t__a"), transient("t__b")], [bad_args("t__a"), bad_args("t__a")]):
+            result, _ = await run(outcomes)
+            self.assertIsNotNone(result.handoff)
+            self.assertIsNone(result.handoff.human_required)
+            self.assertIsNone(result.handoff.agent_recovery_skipped)
+
+    async def test_on_disk_json_omits_the_flags_unless_true(self):
+        import json
+        import tempfile
+        for outcomes, present in (([declined()], True), ([transient("t__a"), transient("t__b")], False)):
+            with tempfile.TemporaryDirectory() as d:
+                await Orchestrator(FakeRegistry(outcomes), client=FakeLLM(outcomes), handoff_dir=Path(d)).run("goal")
+                data = json.loads(next(Path(d).glob("*.json")).read_text(encoding="utf-8"))
+            self.assertEqual(("human_required" in data, "agent_recovery_skipped" in data), (present, present))
+            if present:
+                self.assertEqual((data["human_required"], data["agent_recovery_skipped"]), (True, True))
+
+
 class RecoveryPolicyTests(unittest.IsolatedAsyncioTestCase):
     # -- rule 2: consecutive retryable failures ---------------------------------------------
     async def test_two_consecutive_retryable_failures_trigger_handoff(self):

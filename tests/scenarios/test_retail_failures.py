@@ -37,6 +37,8 @@ async def test_payment_gateway_down_retries_once_then_hands_off_as_retail(tmp_pa
     assert (snap["tool"], snap["error_code"], snap["retryable"], snap["recovery"]) == (
         PAY, "PAYMENT_GATEWAY_TIMEOUT", True, "agent")
     assert "consecutive retryable failures" in data["reason"]
+    # recovery=agent went through the retry path, so the recovery=human flags must be ABSENT (not false, not null)
+    assert "human_required" not in data and "agent_recovery_skipped" not in data
     assert "retail__create_shipment" not in calls
     assert len(retail_server._ORDERS) == 1 and next(iter(retail_server._ORDERS.values()))["status"] != "SHIPPED"
 
@@ -52,6 +54,9 @@ async def test_declined_card_hands_off_immediately_with_zero_retries(tmp_path, m
     assert (snap["tool"], snap["error_code"], snap["retryable"], snap["recovery"], snap["http_status"]) == (
         PAY, "CARD_DECLINED", False, "human", 402)
     assert "Human required" in data["reason"] and "recovery=human" in data["reason"]
+    # observable side effects that ONLY the recovery=human branch produces (D18): not just a string in the reason
+    assert data["human_required"] is True
+    assert data["agent_recovery_skipped"] is True
 
     # zero retry attempts, shown four independent ways
     assert calls.count(PAY) == 1, "the server saw the charge exactly once"
