@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from anthropic_http import AnthropicAPIError, AnthropicHTTP
+from ingest.anthropic_http import AnthropicAPIError, AnthropicHTTP
 from fake_anthropic import FakeAnthropicTransport, error_body, text_response, tool_use_response
 from planners import SUBMIT_PLAN, SYSTEM, STRICT_SUFFIX, ClaudePlanner, PlannedCall, PlannerError
 

@@ -6,6 +6,7 @@ import json
 from types import SimpleNamespace as NS
 
 import conftest
+import pytest
 import perf_capture as pc
 from perf_capture import record_run
 
@@ -61,9 +62,21 @@ def test_median_file_holds_the_median_of_the_last_five_runs_including_the_one_ju
 
 
 def test_too_little_history_gives_no_slow_verdict(tmp_path):
-    seed(tmp_path, [100, 100])                       # only 2 prior runs: a median of 2 is noise
+    seed(tmp_path, [100])                            # one prior run is not a median
     out = record_run(tmp_path, 900.0, N, durs())
     assert out["slow"] is False and not (tmp_path / "last_slow_run.txt").exists()
+
+
+def test_with_the_two_real_history_entries_a_250s_run_fires_and_a_130s_run_does_not(tmp_path):
+    """The breakpoint scenario, with the values really recorded in .perf/history.json (109.88 s and 118.05 s)."""
+    for name, total, fires in (("slow", 250.0, True), ("normal", 130.0, False)):
+        d = tmp_path / name
+        record_run(d, 109.88, 546, durs())
+        record_run(d, 118.05, 546, durs())
+        out = record_run(d, total, 546, durs())
+        assert out["median_before"] == pytest.approx(113.965)
+        assert out["slow"] is fires, (name, total)
+        assert (d / "last_slow_run.txt").exists() is fires
 
 
 def test_partial_runs_are_not_recorded(tmp_path):
@@ -75,9 +88,45 @@ def test_partial_runs_are_not_recorded(tmp_path):
     assert float((tmp_path / "median.txt").read_text(encoding="utf-8")) == 100
 
 
+def test_a_run_much_smaller_than_the_usual_suite_is_excluded_from_history_and_median_even_above_50_tests(tmp_path):
+    """The real bug: 71- and 104-test runs of one directory passed the `< 50` rule and made median.txt read 0.6."""
+    seed(tmp_path, [100, 120])                        # the usual suite: 500 tests, median 110
+    h0 = (tmp_path / "history.json").read_text(encoding="utf-8")
+    for n in (51, 71, 104, 300, 399):                 # all >= 50, all < 0.8 x 500
+        out = record_run(tmp_path, 0.6, n, durs(12))
+        assert out["recorded"] is False and "usual size is 500" in out["reason"], n
+    assert (tmp_path / "history.json").read_text(encoding="utf-8") == h0
+    assert (tmp_path / "median.txt").read_text(encoding="utf-8") == "110.0" + chr(10)
+    assert record_run(tmp_path, 105.0, 400, durs(12))["recorded"] is True, "0.8 x 500 = 400 is still the suite"
+    assert record_run(tmp_path, 130.0, 700, durs(12))["recorded"] is True, "a larger suite is always recorded"
+
+
 def test_runs_of_a_very_different_size_are_not_compared(tmp_path):
     seed(tmp_path, [20, 20, 20, 20], n=100)          # a small suite's history
     assert record_run(tmp_path, 500.0, N, durs())["slow"] is False  # no comparable history for a 500-test run
+
+
+def test_history_is_append_only_in_order_and_old_entries_are_never_rewritten(tmp_path):
+    """median.txt moves with the window, but history.json only ever grows at the end (until the cap drops the oldest)."""
+    seen = []
+    for total in (100, 110, 90, 120, 105, 300, 95):
+        record_run(tmp_path, total, N, durs())
+        hist = [h["total_s"] for h in json.loads((tmp_path / "history.json").read_text(encoding="utf-8"))]
+        assert hist == [100, 110, 90, 120, 105, 300, 95][:len(hist)], "earlier entries untouched, new one appended last"
+        seen.append(len(hist))
+    assert seen == [1, 2, 3, 4, 5, 6, 7]
+
+
+def test_a_partial_run_changes_neither_history_nor_the_median_file(tmp_path):
+    seed(tmp_path, [100, 120])
+    h0 = (tmp_path / "history.json").read_text(encoding="utf-8")
+    m0 = (tmp_path / "median.txt").read_text(encoding="utf-8")
+    for n in (1, 12, pc.MIN_TESTS - 1):
+        assert record_run(tmp_path, 5.0, n, durs(12))["recorded"] is False
+    assert (tmp_path / "history.json").read_text(encoding="utf-8") == h0
+    assert (tmp_path / "median.txt").read_text(encoding="utf-8") == m0 == "110.0\n"
+    # 50 tests is the absolute minimum: in an EMPTY history a 50-test run is recorded (nothing bigger exists yet)
+    assert record_run(tmp_path / "fresh", 100.0, pc.MIN_TESTS, durs(12))["recorded"] is True
 
 
 def test_history_is_capped(tmp_path):

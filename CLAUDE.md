@@ -128,7 +128,25 @@ implemented them. Change them here first, then in code.
   string matches: they catch invented paths/params/quotes, not a real path attached to the wrong method.
   Treat a doc-ingested spec as a draft to read, not to trust. Environment note: on the build machine `import anthropic`
   fails (its `jiter` DLL is blocked by a Windows Application Control policy), so doc ingestion cannot run there even with
-  a key; the planner in D20 avoids the SDK with a plain-HTTP client, and doing the same for `ingest/doc.py` is open.
+  a key; the planner in D20 avoids the SDK with a plain-HTTP client, and `ingest/doc.py` now does the same (below).
+  Restructured so the doc path is testable without a key: `ingest/doc.py` no longer imports the SDK. The model step is a
+  `DocExtractionClient` (`extract(text, *, strict=False)`, returning the model's raw report; deviation from the brief's
+  `-> list[Operation]` because a spec also needs base_url, auth and a title and the grounding checks, confidence caps and
+  review rules must stay shared code that no client can skip: Operations are produced by `ingest()`). Two
+  implementations: `HttpDocExtractionClient` (the real Messages API over plain httpx, `ingest/anthropic_http.py`,
+  `ANTHROPIC_API_KEY` only: the old `ANTHROPIC_AUTH_TOKEN` fallback went with the SDK, because the plain client sends
+  `x-api-key`) and `ingest.testing.StubDocExtractionClient` (serves a fixture report). A `messages.create`-shaped client
+  (the wire-shaped `StubAnthropic`, an SDK client) still works through an adapter, so the existing tests are unchanged.
+  `tests/ingest/test_doc_contract.py` is ONE set of assertions per client: the draft spec validates against
+  `specs/schema.json`, is marked `doc-unverified`, every operation's `needs_review` equals the D12/D15 rule (write, below
+  threshold, or any review reason), and an unflagged operation's path is grounded in the document. It runs
+  unconditionally for the stub (two fixture documents) and for the HTTP client only with `ANTHROPIC_API_KEY` and
+  `LIVE_TESTS=1`, otherwise SKIPPED with the reason ("ANTHROPIC_API_KEY absent"). "The same needs_review flags" means the
+  same RULE applied to whatever each client returned: a real model will not reproduce the stub's report. That the HTTP
+  path yields byte-identical operations to the stub when served the same report is a separate, unconditional wiring test
+  (`tests/ingest/test_doc_http_wiring.py`, through FakeAnthropicTransport). Doc ingestion's WIRING is tested
+  unconditionally against StubDocExtractionClient; the real API path is tested only against FakeAnthropicTransport;
+  actual model judgment remains opt-in and unverified.
 - D17. The flaky gate, investigated. (1) The FAILURE had a root cause, now fixed: `pipeline.pending()` skipped
   any inbox file whose mtime was ahead of `time.time()`. The Windows wall clock ticks every ~15.6 ms, so about 15%
   of freshly written files (295 of 2000 measured) were skipped, `watch(once=True)` then processed nothing, and
@@ -173,17 +191,36 @@ implemented them. Change them here first, then in code.
   auth kind / transport, no cookie or credential carry-over, and that a failed request does not poison the pooled client.
   `tests/conftest.py` empties the pool around every test. (Dropping the per-request `timeout=` is not caught by a test:
   the pooled client is already built with the same timeout, so it is a redundant safeguard, not separately observable.)
-  A budget I had to raise, and why: in one of five full runs, three fast `tests/learning/test_apply.py` tests (copy a git
-  repo, run a handful of `git` subprocesses; 0.2-0.3 s quiet, measured three times) took 2.0-3.5 s and the 2 s guard failed
-  them by name. It did not reproduce on demand, so the cause is NOT proven (the only evidence is the size of the spike and
-  that the work is file- and process-heavy); the module now carries `pytestmark = budget(10)`, ~40x the quiet time, so a
-  real hang still fails. The capture below is what will say more the next time.
+  The `test_apply.py` budget, done properly (this replaces an earlier 10 s module budget, a 17x raise on a 0.2 s test,
+  which hid the problem). One full run in five had failed three fast tests of that module at 2.0-3.5 s. The module is back
+  on the default 2 s (the tests that run the pipeline's pytest gates keep their explicit `budget(30)`) and its autouse
+  `step_timing` fixture times every subprocess call, the repo copy and the generator per test, appending the breakdown of
+  any test over 1.5 s to `.perf/slow_apply_tests.txt` (and every test to `APPLY_TIMING_LOG` when set). 20 runs, 320 test
+  executions: the 240 light executions (copy a git repo, a few `git` calls) had median 0.28 s, max 0.96 s, NONE over 1.5 s;
+  the spike did NOT reproduce. Where the time goes: each `git` process ~0.09 s (`rev-list --count` ran twice per test) and
+  `copytree` of the baseline repo median 0.08 s but p95 0.14 s and max 0.54 s (6.7x its median); only 0.015 s per test was
+  outside a timed step, and the python gates the heavy tests spawn cost ~1.8-1.9 s each. THE WAIT, as far as measured:
+  the variable part is filesystem work on freshly created files and process creation, not git locking and not a shared
+  repo (each test copies its own). What is NOT proven: why one run reached 3.5 s (a 3.6x worse tail than 240 observations);
+  the only hypothesis is an external scan during that window. Cutting the copied file count does not help (`git init
+  --template=` halves the files but copytree medians were 35 ms vs 44 ms), so that was not done. What was done about the
+  cause: light tests no longer spawn git to ask "did a commit happen?": `head()` reads HEAD from `.git` (no subprocess;
+  moved HEAD is "a commit happened", and the test that counts commits still asks git and also checks `head()` saw it).
+  Mutation: a stray commit on every rejected proposal fails 12 tests. After the change, 5 runs: light tests median 0.08-0.2 s
+  (was 0.28 s), max 0.62 s, none over 1.5 s; `copytree` is now the only step with a visible tail (p95 0.39 s). The 2 s
+  budget stays, with ~3x headroom over the worst light execution seen, and a repeat of the spike will now arrive with its
+  per-step breakdown in `.perf/slow_apply_tests.txt` instead of a guess.
   Slow-run duration capture is automatic going forward (`tests/perf_capture.py`, hooks in `tests/conftest.py`): after every
   run of >= 50 tests the wall time is compared with the median of the last 5 comparable runs (test count within
-  0.8x-1.25x); above 2x that median (and with >= 3 prior runs), a `--durations=50`-style report is written to
+  0.8x-1.25x); above 2x that median (and with >= 2 prior comparable runs: a median of two is their mean, and a false positive costs a
+  report file while a miss costs the evidence), a `--durations=50`-style report is written to
   `.perf/last_slow_run.txt` and kept until the next slow run; `.perf/median.txt` holds the median of the last 5 runs and
   `.perf/history.json` the last 20. It is a diagnostic: it cannot fail or slow a run (every error is swallowed with one
-  printed line), partial runs are ignored, and synthetic tests show the report appears on a slow run and not on a normal one.
+  printed line), and synthetic tests show the report appears on a slow run and not on a normal one. Partial runs are
+  excluded from the history AND the median (tests/test_perf_capture.py: `test_a_partial_run_changes_neither_history_nor_the_median_file`):
+  fewer than 50 tests, or fewer than 0.8x the largest run ever recorded. The second rule exists because the first was not
+  enough: runs of 71 and 104 tests (one directory each) passed the `< 50` rule and made `median.txt` read 0.6 s; those
+  entries were pruned from the real `.perf/history.json` (my own partial runs; the two real full-suite runs were kept).
 - D18. Failure-driven learning loop (`learning/`). An unrecoverable failure becomes a CANDIDATE spec correction that
   a person approves; nothing is ever auto-applied. Flow: `collect.py` (handoffs/*.json -> `learning/failures.jsonl`,
   one record per (system, operation, code) per 24h window with a `recurrence` count; it keeps parameter TYPES, never
@@ -272,7 +309,8 @@ implemented them. Change them here first, then in code.
   exactly once (a stricter system prompt, still `auto`), succeeds if the second reply is good, and the second miss raises
   after exactly two requests. Mutations (no retry, forced tool_choice, a third request) are caught. The SDK is not used
   because on this machine `import anthropic` fails (its `jiter` DLL is blocked by a Windows Application Control policy;
-  not worked around), which also means `ingest/doc.py`, which imports the SDK, could not run here even with a key. `test_cross_industry_planners.py` runs the success path
+  not worked around). The plain-HTTP client now lives in `ingest/anthropic_http.py` and is shared with `ingest/doc.py`
+  (D16); `tests/fake_anthropic.py` serves both the planner and the doc-ingestion wiring tests. `test_cross_industry_planners.py` runs the success path
   and the banking outage with each planner, same opt-in. Retail coverage (`test_retail_failures.py`): payment gateway
   down (retryable, recovery=agent) is retried once and then handed off as `failure_industry=retail` with the completed
   retail steps listed; a declined card (`CARD_DECLINED`, recovery=human, http_status=402, injected with

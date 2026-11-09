@@ -1,12 +1,13 @@
 """A minimal client for the Anthropic Messages API over plain httpx. No SDK.
 
 Why it exists: on the machine this project was built on, `import anthropic` fails (its `jiter` DLL is blocked by a
-Windows Application Control policy), so an SDK-based planner could not run here even with a key. Speaking the documented
+Windows Application Control policy), so an SDK-based client could not run here even with a key. Speaking the documented
 HTTP API directly removes that dependency AND puts the injectable seam at the wire format: a fake httpx transport sees
-the exact request body and answers with a real-shaped response (tests/scenarios/fake_anthropic.py).
+the exact request body and answers with a real-shaped response (tests/fake_anthropic.py).
 
-Surface used by ClaudePlanner: `client.messages.create(model=, max_tokens=, system=, tools=, tool_choice=, messages=)`
-returning an object with `.content` (blocks with `.type`, `.name`, `.input`, `.text`) and `.stop_reason`.
+Surface used by callers: `client.messages.create(model=, max_tokens=, system=, tools=, tool_choice=, messages=)`
+returning an object with `.content` (blocks with `.type`, `.name`, `.input`, `.text`) and `.stop_reason`; the same
+surface the SDK offers, so SDK-shaped stubs and this client are interchangeable.
 Not verified against the live API in this repo (no key): the request/response shapes follow the published Messages API.
 """
 from __future__ import annotations

@@ -86,7 +86,7 @@ GATE_MODULES = {"test_review_gate", "test_pipeline", "test_pipeline_fixtures", "
                 "test_doc_unverified", "test_collect", "test_patchfmt",
                 "test_propose", "test_apply", "test_http_status",
                 "test_cross_industry", "test_orchestrator_generality", "test_cross_industry_handoff",
-                "test_retail_failures", "test_planner_wiring", "test_http_pool", "test_perf_capture"}
+                "test_retail_failures", "test_planner_wiring", "test_http_pool", "test_perf_capture", "test_doc_http_wiring"}
 DEFAULT_BUDGET_S = 2.0
 
 

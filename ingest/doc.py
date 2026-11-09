@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any
+from typing import Any, Protocol
 
+from ingest.anthropic_http import AnthropicAPIError, AnthropicHTTP
 from ingest.common import (invalid_argument_example, make_operation, make_param, make_spec,
                            normalize_path, ok_example, snake)
 
@@ -118,15 +119,63 @@ UNVERIFIED_SOURCE = "doc-unverified"
 
 # -- LLM step ------------------------------------------------------------------------------------
 
-def _get_client() -> Any:
-    if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
-        raise IngestError("ANTHROPIC_API_KEY is not set: doc ingestion calls the Claude API. Set the key, or "
-                          "pass client=... (tests use ingest.testing.StubAnthropic).")
-    try:
-        import anthropic
-        return anthropic.Anthropic()
-    except Exception as exc:  # missing package or bad config: say so plainly
-        raise IngestError(f"could not create the Anthropic client: {type(exc).__name__}: {exc}") from exc
+class DocExtractionClient(Protocol):
+    """Who asks the model: turns documentation text into the model's RAW report (the input of the `report_api` tool:
+    system_title, base_url, auth, operations[...]). Everything after that (grounding checks, confidence caps, the review
+    rules, the draft spec) is shared deterministic code in this module, so no client can skip it.
+
+    Deviation from the brief's `extract(text) -> list[Operation]`: a spec also needs base_url, auth and a title, and the
+    checks must stay shared; the Operations are produced by `ingest()`. `strict=True` asks with a stricter prompt (the
+    pipeline's single visible retry after DocNoToolCall). Two implementations: HttpDocExtractionClient (the real Messages
+    API over plain httpx, no SDK) and ingest.testing.StubDocExtractionClient (a fixture report, used by the doc path's own
+    tests so the path has a contract test that needs no key)."""
+
+    name: str
+
+    def extract(self, text: str, *, strict: bool = False) -> dict[str, Any]: ...
+
+
+class MessagesDocClient:
+    """Adapter: any object shaped like `client.messages.create(...)` (the plain-httpx client, an SDK client, or the
+    wire-shaped ingest.testing.StubAnthropic) becomes a DocExtractionClient."""
+
+    name = "messages"
+
+    def __init__(self, client: Any, model: str | None = None) -> None:
+        self._client, self._model = client, model or DEFAULT_MODEL
+
+    def extract(self, text: str, *, strict: bool = False) -> dict[str, Any]:
+        return _call_model(self._client, self._model, text, strict)
+
+
+class HttpDocExtractionClient(MessagesDocClient):
+    """The real path: Claude's Messages API over plain httpx. Without `client` it is built from ANTHROPIC_API_KEY and
+    raises IngestError when that is not set. Pass `client=AnthropicHTTP(key, transport=FakeAnthropicTransport(...))` to
+    test the wiring without a key."""
+
+    name = "http"
+
+    def __init__(self, client: Any = None, model: str | None = None) -> None:
+        if client is None:
+            key = os.environ.get("ANTHROPIC_API_KEY")
+            if not key:
+                raise IngestError("ANTHROPIC_API_KEY is not set: doc ingestion calls the Claude API. Set the key, or "
+                                  "pass client=... (tests use ingest.testing.StubDocExtractionClient).")
+            try:
+                client = AnthropicHTTP(key)
+            except AnthropicAPIError as exc:
+                raise IngestError(f"could not create the Claude API client: {exc}") from exc
+        super().__init__(client, model)
+
+
+def _as_extraction_client(client: Any, model: str | None) -> DocExtractionClient:
+    if client is None:
+        return HttpDocExtractionClient(model=model)
+    if hasattr(client, "extract"):
+        return client  # a DocExtractionClient: `model` does not apply to it
+    if hasattr(client, "messages"):
+        return MessagesDocClient(client, model)
+    raise IngestError("doc ingestion needs a DocExtractionClient (.extract) or a messages.create-style client")
 
 
 STRICT_SUFFIX = (
@@ -271,9 +320,9 @@ def ingest_with_report(text: str, client: Any = None, model: str | None = None,
     """Return (draft spec, notes about operations that were left out of it)."""
     if not isinstance(text, str) or not text.strip():
         raise IngestError("the documentation text is empty")
-    if client is None:
-        client = _get_client()
-    data = _call_model(client, model or DEFAULT_MODEL, text, strict)
+    data = _as_extraction_client(client, model).extract(text, strict=strict)
+    if not isinstance(data, dict):
+        raise IngestError("the extraction client did not return a JSON object")
     ops_raw = data.get("operations")
     if not isinstance(ops_raw, list) or not ops_raw:
         raise IngestError("the model response has no `operations` list")

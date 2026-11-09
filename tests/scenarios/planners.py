@@ -102,7 +102,7 @@ class ClaudePlanner:
     def plan(self, intents: Sequence[dict], tools: Sequence[dict]) -> list[PlannedCall]:
         client = self._client
         if client is None:
-            from anthropic_http import AnthropicHTTP  # lazy: building the keyword planner needs no key
+            from ingest.anthropic_http import AnthropicHTTP  # lazy: building the keyword planner needs no key
             client = AnthropicHTTP()
         payload = {"intents": [{"id": i["id"], "intent": i["intent"], "consumes": i.get("consumes") or []}
                                for i in intents],

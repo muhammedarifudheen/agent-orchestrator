@@ -1,9 +1,10 @@
 """FakeAnthropicTransport: an httpx transport that plays the Anthropic Messages API.
 
 It exercises the WIRE FORMAT (request body, headers, response shape, error shape) end to end through the real client
-code. It does NOT imitate the model's judgment: the plans it returns are whatever the test queues. The response shapes
+code. It does NOT imitate the model's judgment: the replies it serves are whatever the test queues. The response shapes
 below follow the published Messages API (a message object with typed content blocks and a stop_reason); they are
 modelled on that documentation, not captured from a live call, because there is no key on this machine.
+Shared by the planner wiring tests (tests/scenarios) and the doc-ingestion wiring tests (tests/ingest).
 """
 from __future__ import annotations
 
@@ -13,21 +14,25 @@ from typing import Any
 import httpx
 
 
-def tool_use_response(calls: Any, *, tool: str = "submit_plan", stop_reason: str = "tool_use") -> dict[str, Any]:
-    """A realistic assistant message whose content is one tool_use block."""
+def tool_use_message(tool: str, tool_input: dict[str, Any], *, stop_reason: str = "tool_use") -> dict[str, Any]:
+    """A realistic assistant message whose content is a short text block and one tool_use block."""
     return {
         "id": "msg_01XFDUDYJgAACzvnptvVoYEL", "type": "message", "role": "assistant",
         "model": "claude-sonnet-5-5",
-        "content": [{"type": "text", "text": "I'll submit the plan."},
-                    {"type": "tool_use", "id": "toolu_01A09q90qw90lq917835lq9", "name": tool,
-                     "input": {"calls": calls}}],
+        "content": [{"type": "text", "text": "Done."},
+                    {"type": "tool_use", "id": "toolu_01A09q90qw90lq917835lq9", "name": tool, "input": tool_input}],
         "stop_reason": stop_reason, "stop_sequence": None,
         "usage": {"input_tokens": 1103, "output_tokens": 187},
     }
 
 
+def tool_use_response(calls: Any, *, tool: str = "submit_plan", stop_reason: str = "tool_use") -> dict[str, Any]:
+    """The planner's reply: a tool_use block whose input is {"calls": [...]}."""
+    return tool_use_message(tool, {"calls": calls}, stop_reason=stop_reason)
+
+
 def text_response(text: str) -> dict[str, Any]:
-    """A reply that never calls a tool (what the planner must treat as a miss)."""
+    """A reply that never calls a tool (what a caller must treat as a miss)."""
     return {
         "id": "msg_01Aq9w938a90dw8q", "type": "message", "role": "assistant", "model": "claude-sonnet-5-5",
         "content": [{"type": "text", "text": text}], "stop_reason": "end_turn", "stop_sequence": None,

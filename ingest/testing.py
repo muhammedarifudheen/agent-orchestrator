@@ -43,3 +43,25 @@ class StubAnthropic:
         self.calls: list[dict[str, Any]] = []
         self.text_first = text_first
         self.messages = _Messages(self)
+
+
+class StubDocExtractionClient:
+    """A DocExtractionClient (ingest.doc) that serves a fixture REPORT: the same dict the model would put in the
+    `report_api` tool input. No messages API, no transport, no key. `miss_first=N`: the first N calls raise
+    DocNoToolCall, as a model that forgot to call the tool would."""
+
+    name = "stub"
+
+    def __init__(self, canned: dict[str, Any] | str | Path, *, miss_first: int = 0) -> None:
+        if isinstance(canned, (str, Path)):
+            canned = json.loads(Path(canned).read_text(encoding="utf-8"))
+        self.canned: dict[str, Any] = canned
+        self.calls: list[dict[str, Any]] = []
+        self.miss_first = miss_first
+
+    def extract(self, text: str, *, strict: bool = False) -> dict[str, Any]:
+        from ingest.doc import DocNoToolCall
+        self.calls.append({"text": text, "strict": strict})
+        if len(self.calls) <= self.miss_first:
+            raise DocNoToolCall("end_turn", "stub: the model forgot to call the tool")
+        return copy.deepcopy(self.canned)

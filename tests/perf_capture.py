@@ -20,8 +20,10 @@ from typing import Any
 
 HISTORY_KEEP = 5       # runs that define "normal"
 HISTORY_LIMIT = 20     # runs remembered in history.json
-MIN_HISTORY = 3        # a median of fewer than 3 runs is noise: no slow-run verdict yet
+MIN_HISTORY = 2        # a median needs 2 runs (their mean); a false positive costs only a report file, a miss costs the evidence
 MIN_TESTS = 50         # smaller runs (one file, one -k) are not recorded: they would drag the median around
+# Also not recorded: a run smaller than COMPARABLE[0] x the LARGEST run ever recorded. 50 tests is not "the suite": a
+# 71-test run of one directory passed the 50 rule and flipped median.txt to 0.6 s, which is how this rule was found.
 SLOW_FACTOR = 2.0
 TOP = 50
 COMPARABLE = (0.8, 1.25)  # a run is comparable when its test count is within this factor of the current one
@@ -56,6 +58,10 @@ def record_run(perf_dir: Path, total_s: float, n_tests: int, durations: dict[tup
             history = json.loads(hist_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             history = []
+        biggest = max((h["n_tests"] for h in history), default=0)
+        if n_tests < COMPARABLE[0] * biggest:
+            return {"recorded": False,
+                    "reason": f"partial run ({n_tests} tests; the suite's usual size is {biggest})"}
 
         recent = _comparable(history, n_tests)[-HISTORY_KEEP:]
         median_before = statistics.median(h["total_s"] for h in recent) if len(recent) >= MIN_HISTORY else None
