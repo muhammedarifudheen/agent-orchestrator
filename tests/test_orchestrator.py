@@ -16,6 +16,10 @@ from agent.orchestrator import Orchestrator  # noqa: E402
 from agent.tool_registry import ToolRegistry  # noqa: E402
 
 SERVERS = Path(__file__).parent.parent / "servers"
+# These tests drive travel tools only. ToolRegistry(SERVERS) would spawn a real stdio subprocess (~1 s, mostly
+# `import mcp`) for EVERY servers/*_server.py, so each test paid for all of them and its cost grew with every new
+# system (D17). Scope the registry to the server under test; full discovery is covered once, below.
+TRAVEL = "travel_server.py"
 TOMORROW = (date.today() + timedelta(days=1)).isoformat()
 
 
@@ -39,9 +43,18 @@ class StubClient:
         return NS(content=blocks)
 
 
+class RegistryDiscoveryTest(unittest.IsolatedAsyncioTestCase):
+    async def test_default_registry_discovers_and_connects_every_server_over_stdio(self):
+        """The one place that spawns ALL servers as real subprocesses (it costs ~1 s per server, so only once)."""
+        expected = {p.name[: -len("_server.py")] for p in SERVERS.glob("*_server.py")}
+        async with ToolRegistry(SERVERS) as reg:
+            self.assertEqual(reg.connect_errors, {})
+            self.assertEqual({t["name"].partition("__")[0] for t in reg.anthropic_tools()}, expected)
+
+
 class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
     async def _run(self, turns, **kw):
-        async with ToolRegistry(SERVERS) as reg:
+        async with ToolRegistry(SERVERS, pattern=TRAVEL) as reg:
             self.assertIn("travel__search_flights", [t["name"] for t in reg.anthropic_tools()])
             with tempfile.TemporaryDirectory() as d:
                 orch = Orchestrator(reg, client=StubClient(turns), handoff_dir=Path(d), **kw)
@@ -121,7 +134,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 raise ConnectionError("no network")
 
         Boom.messages = Boom()
-        async with ToolRegistry(SERVERS) as reg:
+        async with ToolRegistry(SERVERS, pattern=TRAVEL) as reg:
             result = await Orchestrator(reg, client=Boom()).run("x")
         self.assertFalse(result.success)
         self.assertIn("ConnectionError", result.handoff.reason)

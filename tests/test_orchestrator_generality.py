@@ -14,6 +14,7 @@ import re
 from pathlib import Path
 from types import SimpleNamespace as NS
 
+import httpx
 import pytest
 
 from agent.orchestrator import Orchestrator
@@ -43,13 +44,25 @@ class PlanLLM:
         return NS(content=[NS(type="text", text="Stopping.")])
 
 
+@pytest.fixture(autouse=True)
+def stub_upstream(monkeypatch):
+    """HTTP-backed (generated) servers get a stub upstream that answers 503, instead of a real connection attempt.
+    The real tool code still runs (validation, error mapping, contract text); only the socket is replaced. Without
+    this every no-argument tool paid ~0.3 s to build an SSL context just to be refused by the offline guard, which put
+    the 2 s gate budget at risk on a loaded host (D17)."""
+    real = httpx.Client
+    handler = lambda request: httpx.Response(503, json={"error": "stub upstream"})
+    monkeypatch.setattr(httpx, "Client", lambda **kw: real(**{**kw, "transport": httpx.MockTransport(handler)}))
+
+
 def test_every_server_in_the_directory_is_registered_and_the_params_cover_them():
     assert len(SERVER_NAMES) >= 8, SERVER_NAMES  # travel, retail, banking + the five generated ones
 
 
 @pytest.mark.parametrize("server", SERVER_NAMES)
 async def test_orchestrator_drives_every_tool_of_this_server_through_the_same_contract(server, tmp_path):
-    async with InMemoryRegistry(SERVERS) as reg:
+    # scoped to this server: the cost must not grow with the number of OTHER servers (D17)
+    async with InMemoryRegistry(SERVERS, pattern=f"{server}_server.py") as reg:
         tools = [t["name"] for t in reg.anthropic_tools() if t["name"].partition(SEP)[0] == server]
         assert tools, f"registry discovered no tools for {server}"
         for tool in tools:

@@ -145,6 +145,25 @@ implemented them. Change them here first, then in code.
   the tests that run the pipeline's subprocess gates declare `@pytest.mark.budget(N)` (30 s, 15 s for the
   one-subprocess rollback test) against ~7-9 s normally. A violation fails that test BY NAME with its duration.
   `tests/test_gate_guard.py` tests the guards, and both were demonstrated firing.
+  (4) Suite growth, measured (suite wall time: 148 s, 315 s, 660 s, then 207 s and 164 s on the SAME code, so it is not a
+  monotonic leak; the 660 s run kept no per-test data and cannot be decomposed, which was my mistake). Per-test
+  comparison of commit c0540a2 (164 s) against the next head (207 s): every test that starts subprocesses was 20-45%
+  slower (`test_orchestrator.py` 67.5 -> 89.9 s, `test_pipeline_fixtures.py` 24.6 -> 29.9, `test_apply.py` 17.5 -> 22.3,
+  `test_import.py` 17.0 -> 20.6) while in-process tests did not move (`test_travel.py` 0.9 -> 0.2). One process spawn costs
+  ~1.0 s here (`import mcp` alone is 0.9 s; bare `python -c pass` is 0.05 s), so subprocess-heavy tests multiply any
+  slowdown of process creation. THE SCALING CULPRIT: `tests/test_orchestrator.py` (former lines 44 and 124) built
+  `ToolRegistry(SERVERS)`, whose default pattern spawns a real stdio subprocess for EVERY `servers/*_server.py`, so each of
+  its 8 tests paid 1 s x (number of servers) (9.6 s each at c0540a2, 12-15 s in the 207 s run) although it only uses travel
+  tools; it was 41% of the baseline suite and grows with every system added. Fix: those tests now use
+  `pattern="travel_server.py"` (~1.2 s each); one new test, `RegistryDiscoveryTest`, still spawns all servers over real
+  stdio ONCE so full discovery stays covered. A second, smaller cost of the same kind was mine: the new generality test
+  built a registry of all servers per parametrized case and sent no-argument tools of HTTP-backed servers to a real
+  `httpx.Client` (each builds an SSL context, ~0.3 s, only to be refused by the offline guard): it now scopes the registry
+  to its own server and gives HTTP servers a stub 503 upstream (10.2 s -> 0.4 s; before that it tripped the 2 s budget
+  twice in a loaded run). Still scaling with repo size, by design: `test_import.py` (2 subprocesses per server: that is
+  what it verifies) and the pipeline/apply gates (constant per test, ~4 subprocesses). After the fix, two consecutive full
+  runs took 110 s and 109 s. Not fixed: `servers/_http.py` builds a new `httpx.Client` (and SSL context) on every call,
+  ~0.3 s of avoidable latency per real request; it is runtime code, out of scope here, noted for a later package.
 - D18. Failure-driven learning loop (`learning/`). An unrecoverable failure becomes a CANDIDATE spec correction that
   a person approves; nothing is ever auto-applied. Flow: `collect.py` (handoffs/*.json -> `learning/failures.jsonl`,
   one record per (system, operation, code) per 24h window with a `recurrence` count; it keeps parameter TYPES, never
@@ -200,8 +219,30 @@ implemented them. Change them here first, then in code.
   sent "transfer money" to the balance tool), and rewording an intent can break the mapping. What the scenario proves is
   that the orchestrator and registry carry state across industries and hand off with the full cross-industry context;
   it does NOT prove that a real model picks the right tool. The failure is a real fault inside a real tool
-  (`BANKING_FAIL_MODE=core_down`, `TRAVEL_FAIL_MODE=all_down`), never a patched handoff. Only banking and travel
-  outages are injected; retail's `payment_down` and non-outage failures (declines, KYC rejection) are not covered here.
+  (`BANKING_FAIL_MODE=core_down`, `TRAVEL_FAIL_MODE=all_down`), never a patched handoff. Banking and travel
+  outages are injected in `test_cross_industry.py`; retail's `payment_down` and a declined card are in D20's package
+  (`test_retail_failures.py`). KYC rejection and other non-outage failures are still not covered.
+- D20. Who chooses the tools is a replaceable part, and the scenario is validated by a contract, not by tuning.
+  `tests/scenarios/planners.py` defines `IntentPlanner.plan(intents, tools) -> list[PlannedCall(intent_id, tool)]`
+  (deviation from the brief's `plan(intents)`: a planner cannot choose without being shown the registry, and the call
+  arguments are left to the executor `PlannedLLM` because they depend on earlier results). `KeywordPlanner` is the old
+  matcher (default, no key); `ClaudePlanner` asks a real model for a `submit_plan` tool call (`tool_choice: auto` plus an
+  explicit post-check, no silent fallback, same reasoning as D16). `test_planner_contract.py` holds ONE set of assertions
+  that every planner must pass on `cross_industry.yaml`: every intent exactly once and with a tool of its declared
+  industry, at least two industries, no tool outside the registry, no call before its prerequisite (`consumes` and
+  `order_constraints`). It runs for KeywordPlanner always, and for ClaudePlanner only when `ANTHROPIC_API_KEY` is set and
+  `LIVE_TESTS=1`; otherwise it is SKIPPED with the reason ("ANTHROPIC_API_KEY absent"), never passed. The checks
+  themselves are shown to fail on bad plans (one industry, a ghost tool, book-before-search, a dropped intent, the wrong
+  industry). `test_planner_wiring.py` tests ClaudePlanner's request and parsing with an injected fake client; that is
+  wiring, not the contract, and says nothing about whether a real model plans well. STATUS: the Claude half has NEVER
+  RUN (no key on this machine); only the keyword half is evidenced. `test_cross_industry_planners.py` runs the success path
+  and the banking outage with each planner, same opt-in. Retail coverage (`test_retail_failures.py`): payment gateway
+  down (retryable, recovery=agent) is retried once and then handed off as `failure_industry=retail` with the completed
+  retail steps listed; a declined card (`CARD_DECLINED`, recovery=human, http_status=402, injected with
+  `tests/scenarios/inject.py`, which restores the tool's annotations, unlike the older `card_declined` conftest fixture
+  that drops them) hands off with ZERO retries (the server saw the charge once, `agent_failures` is empty); a mutation
+  that disabled the recovery=human branch was caught (by the handoff reason text, because the fail-safe path also stops
+  at once), and the declined handoff reaches `collect.py` with `status: 402`.
 
 ## Architecture: genericity
 

@@ -127,10 +127,15 @@ def _from_facts(prop: str, uses: list[str], facts: dict[str, Any]) -> Any:
     return None
 
 
-class IntentLLM:
-    """Quacks like the Anthropic client (``llm.messages.create(...)``); see module docstring."""
+class PlannedLLM:
+    """Quacks like the Anthropic client (``llm.messages.create(...)``); see module docstring. The tool CHOICE comes
+    from a planner (planners.IntentPlanner), asked once, on the first turn, with the tools the orchestrator offers;
+    this class only executes the plan: it builds each call's arguments, retries once on recovery=agent, and stops
+    on anything else."""
 
-    def __init__(self, intents: list[dict], facts: dict[str, Any]) -> None:
+    def __init__(self, intents: list[dict], facts: dict[str, Any], planner: Any) -> None:
+        self.planner = planner
+        self.plan: list[Any] | None = None
         # only plain-words fields are kept: no industry label, no tool name ever reaches the stub
         self.intents = [{k: i.get(k) for k in ("id", "intent", "uses", "consumes")} for i in intents]
         self.facts = resolve_facts(facts)
@@ -155,10 +160,13 @@ class IntentLLM:
                 return self._call(intent, tool, args, "That failed; retrying the same call once.")
             else:
                 return NS(content=[NS(type="text", text=f"Stopping: {intent['id']} failed ({m.group(1)}).")])
-        if self._pos >= len(self.intents):
+        if self.plan is None:
+            self.plan = self.planner.plan(self.intents, tools)
+        if self._pos >= len(self.plan):
             return NS(content=[NS(type="text", text="All requested steps are done.")])
-        intent = self.intents[self._pos]
-        tool = choose_tool(intent["intent"], tools)
+        planned = self.plan[self._pos]
+        intent = next(i for i in self.intents if i["id"] == planned.intent_id)
+        tool = next((t for t in tools if t["name"] == planned.tool), {"name": planned.tool, "input_schema": {}})
         prior = [self.results[c] for c in intent["consumes"] if c in self.results]
         args = self._build_args(intent, tool, prior)
         return self._call(intent, tool, args, f"Next: {intent['intent']}.")
@@ -183,6 +191,14 @@ class IntentLLM:
             if value is not None:
                 args[prop] = value
         return args
+
+
+class IntentLLM(PlannedLLM):
+    """The default stand-in: PlannedLLM with the keyword planner (kept so existing tests read the same)."""
+
+    def __init__(self, intents: list[dict], facts: dict[str, Any]) -> None:
+        from planners import KeywordPlanner  # lazy: planners imports choose_tool from this module
+        super().__init__(intents, facts, KeywordPlanner())
 
 
 def _last_result_text(messages: list[dict]) -> str:

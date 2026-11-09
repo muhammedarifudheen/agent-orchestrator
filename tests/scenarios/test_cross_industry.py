@@ -15,7 +15,7 @@ import retail_server
 import travel_server
 from agent.orchestrator import Orchestrator
 from inmem import SpyRegistry
-from intent_llm import IntentLLM
+from intent_llm import IntentLLM, PlannedLLM
 
 ROOT = Path(__file__).parent.parent.parent
 SERVERS = ROOT / "servers"
@@ -41,10 +41,11 @@ def fresh_worlds(monkeypatch):
     retail_server._reset_state()
 
 
-async def run_scenario(tmp_path: Path, intents=None, env: dict | None = None, monkeypatch=None):
+async def run_scenario(tmp_path: Path, intents=None, env: dict | None = None, monkeypatch=None, planner=None):
     for k, v in (env or {}).items():
         monkeypatch.setenv(k, v)
-    llm = IntentLLM(intents or INTENTS, SCENARIO["facts"])
+    llm = (PlannedLLM(intents or INTENTS, SCENARIO["facts"], planner) if planner is not None
+           else IntentLLM(intents or INTENTS, SCENARIO["facts"]))
     async with SpyRegistry(SERVERS) as reg:  # default pattern: every server, generated ones included
         orch = Orchestrator(reg, client=llm, handoff_dir=tmp_path, user_id="tester")
         result = await orch.run(SCENARIO["goal"])
