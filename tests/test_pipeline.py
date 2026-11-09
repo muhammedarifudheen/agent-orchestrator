@@ -40,8 +40,8 @@ def test_undetectable_input_is_rejected(tmp_path, filename, content):
 
 # -- success path --------------------------------------------------------------------------------
 
-# BUDGET: spawns the pipeline's subprocess pytest gates (staged + promoted, 2 runs each): ~7-9 s normally; 30 s trips on a ~4x slowdown
-@pytest.mark.budget(30)
+# BUDGET (D17, measured over 15 full-suite runs): max(2*p95, median+2) = 11.7 s; median 4.98, p95 5.80, max 6.15
+@pytest.mark.budget(11.7)
 def test_clean_read_spec_is_generated_verified_and_promoted(tmp_path):
     layout = layout_in(tmp_path)
     source = drop(layout.inbox, spec_with("pipeok", read_op("get_item"), read_op("get_other", path="/other/{item_id}")))
@@ -60,7 +60,8 @@ def test_clean_read_spec_is_generated_verified_and_promoted(tmp_path):
 
 # -- failures are reported, rolled back, never silent --------------------------------------------
 
-@pytest.mark.budget(15)
+# BUDGET (D17, measured over 15 full-suite runs): max(2*p95, median+2) = 3.4 s; median 1.30, p95 1.64, max 1.68
+@pytest.mark.budget(3.4)
 def test_a_spec_whose_own_tests_fail_is_rolled_back_and_never_promoted(tmp_path):
     layout = layout_in(tmp_path)
     bad = make_operation(

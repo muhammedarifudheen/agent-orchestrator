@@ -134,8 +134,14 @@ implemented them. Change them here first, then in code.
   `-> list[Operation]` because a spec also needs base_url, auth and a title and the grounding checks, confidence caps and
   review rules must stay shared code that no client can skip: Operations are produced by `ingest()`). Two
   implementations: `HttpDocExtractionClient` (the real Messages API over plain httpx, `ingest/anthropic_http.py`,
-  `ANTHROPIC_API_KEY` only: the old `ANTHROPIC_AUTH_TOKEN` fallback went with the SDK, because the plain client sends
-  `x-api-key`) and `ingest.testing.StubDocExtractionClient` (serves a fixture report). A `messages.create`-shaped client
+  `ANTHROPIC_API_KEY` only. The old `ANTHROPIC_AUTH_TOKEN` fallback was REMOVED DELIBERATELY with the SDK, because the
+  plain client sends `x-api-key`, not a bearer token, and it is a breaking change for anyone who relied on it. It is not
+  silent: if `ANTHROPIC_AUTH_TOKEN` is set and `ANTHROPIC_API_KEY` is not, constructing the client (so, at the start of doc
+  ingestion or of the planner) raises "ANTHROPIC_AUTH_TOKEN is set but no longer supported; set ANTHROPIC_API_KEY." and
+  makes no request; the message names the fix and never echoes the token. If both are set the API key wins and no
+  Authorization header is sent. Tested in `test_auth_token_without_an_api_key_is_a_loud_error_naming_the_fix_at_startup`
+  (client, doc client and the default `ingest()` path), `test_an_api_key_wins_when_both_variables_are_set_...` and a planner
+  case; disabling the check fails them) and `ingest.testing.StubDocExtractionClient` (serves a fixture report). A `messages.create`-shaped client
   (the wire-shaped `StubAnthropic`, an SDK client) still works through an adapter, so the existing tests are unchanged.
   `tests/ingest/test_doc_contract.py` is ONE set of assertions per client: the draft spec validates against
   `specs/schema.json`, is marked `doc-unverified`, every operation's `needs_review` equals the D12/D15 rule (write, below
@@ -162,8 +168,8 @@ implemented them. Change them here first, then in code.
   files, Defender real-time scanning is on, and every generation test starts four Python processes); the
   cold-cache result argues against a pure file-scan explanation, so confidence is low. (3) So it can never be
   shrugged off again: gate tests (`tests/conftest.py`, `GATE_MODULES`) must be offline and finish within 2 s;
-  the tests that run the pipeline's subprocess gates declare `@pytest.mark.budget(N)` (30 s, 15 s for the
-  one-subprocess rollback test) against ~7-9 s normally. A violation fails that test BY NAME with its duration.
+  the tests that run the pipeline's subprocess gates declare `@pytest.mark.budget(N)` (originally round numbers,
+  30 s and 15 s; since (6) below, measured values). A violation fails that test BY NAME with its duration.
   `tests/test_gate_guard.py` tests the guards, and both were demonstrated firing.
   (4) Suite growth, measured (suite wall time: 148 s, 315 s, 660 s, then 207 s and 164 s on the SAME code, so it is not a
   monotonic leak; the 660 s run kept no per-test data and cannot be decomposed, which was my mistake). Per-test
@@ -193,9 +199,10 @@ implemented them. Change them here first, then in code.
   the pooled client is already built with the same timeout, so it is a redundant safeguard, not separately observable.)
   The `test_apply.py` budget, done properly (this replaces an earlier 10 s module budget, a 17x raise on a 0.2 s test,
   which hid the problem). One full run in five had failed three fast tests of that module at 2.0-3.5 s. The module is back
-  on the default 2 s (the tests that run the pipeline's pytest gates keep their explicit `budget(30)`) and its autouse
-  `step_timing` fixture times every subprocess call, the repo copy and the generator per test, appending the breakdown of
-  any test over 1.5 s to `.perf/slow_apply_tests.txt` (and every test to `APPLY_TIMING_LOG` when set). 20 runs, 320 test
+  on the default 2 s (the tests that run the pipeline's pytest gates keep their own explicit budgets, see (6)) and its per-step timing
+  (`tests/step_timing.py`, via the `timed_steps` fixture in conftest, now also on every explicitly budgeted test) times every
+  subprocess call, the repo copy and the generator per test, appending the breakdown of any test over 75% of its budget
+  to `.perf/slow_tests.txt` (and every test to `STEP_TIMING_LOG` when set). 20 runs, 320 test
   executions: the 240 light executions (copy a git repo, a few `git` calls) had median 0.28 s, max 0.96 s, NONE over 1.5 s;
   the spike did NOT reproduce. Where the time goes: each `git` process ~0.09 s (`rev-list --count` ran twice per test) and
   `copytree` of the baseline repo median 0.08 s but p95 0.14 s and max 0.54 s (6.7x its median); only 0.015 s per test was
@@ -209,7 +216,25 @@ implemented them. Change them here first, then in code.
   Mutation: a stray commit on every rejected proposal fails 12 tests. After the change, 5 runs: light tests median 0.08-0.2 s
   (was 0.28 s), max 0.62 s, none over 1.5 s; `copytree` is now the only step with a visible tail (p95 0.39 s). The 2 s
   budget stays, with ~3x headroom over the worst light execution seen, and a repeat of the spike will now arrive with its
-  per-step breakdown in `.perf/slow_apply_tests.txt` instead of a guess.
+  per-step breakdown in `.perf/slow_tests.txt` instead of a guess.
+  (6) The explicit budgets are MEASURED, not round: `budget = max(2 x p95, median + 2 s)` of the test's wall time over 15 runs,
+  rounded up to 0.1 s (p95 by linear interpolation: with 15 runs it sits at index 13.3, so it is close to the max). A
+  parametrized test has one marker and takes the largest budget among its cases. Measured twice, 15 runs each: the 9
+  budgeted items alone (`-m budget`), and inside the full suite (the figures below; the budget applies there). Full
+  suite, seconds, median / p95 / max -> budget: `test_approved_green_proposal_...` 5.99/6.71/7.12 -> 13.5;
+  `test_reviewed_and_approved_spec_...` 5.87/6.69/6.85 -> 13.4; `test_fixture_is_ingested_...` ([doc] worst) 4.82/5.93/6.56
+  -> 11.9 ([trace] 5.09/5.64/6.27, [openapi] 4.82/5.88/6.24); `test_clean_read_spec_...` 4.98/5.80/6.15 -> 11.7;
+  `test_second_verify_red_...` 2.80/2.96/2.97 -> 6.0; `test_red_verification_...` 1.56/1.71/1.77 -> 3.6;
+  `test_a_spec_whose_own_tests_fail_...` 1.30/1.64/1.68 -> 3.4 (was 15). Previously 30 s (30/15), i.e. 2.2-20x the p95.
+  Tails: for every test max/p95 was <= 1.11 (isolated runs: <= 1.16), so the "max > 3x p95" rule never fired and there
+  is no unproven tail. What the tail is made of: each pipeline gate is a pytest subprocess costing a steady 1.2 s (median
+  1.15-1.24, p95 1.37-1.61, max 1.48-1.67), no single step dominates; the largest per-test excess in the slowest runs
+  was 0.1-0.35 s on one subprocess. The prediction this formula makes, stated so it can be falsified: a heavy test needs a
+  ~2.3x slowdown of the whole host to fail its budget. That has happened once in the runs recorded here (one loaded full
+  run took 207 s against ~80-110 s, with `[openapi]` at 12.1 s against its new 11.9 s budget), and then it SHOULD fail, by name,
+  with the slow-run capture and `.perf/slow_tests.txt` filled in. The same quiet host gave 4.8 s for `[doc]` here and 7.5 s in
+  an earlier full run: the difference between those two runs is host load, not the suite's context (the isolated 9-test runs
+  agree with the in-suite ones when the host is quiet).
   Slow-run duration capture is automatic going forward (`tests/perf_capture.py`, hooks in `tests/conftest.py`): after every
   run of >= 50 tests the wall time is compared with the median of the last 5 comparable runs (test count within
   0.8x-1.25x); above 2x that median (and with >= 2 prior comparable runs: a median of two is their mean, and a false positive costs a

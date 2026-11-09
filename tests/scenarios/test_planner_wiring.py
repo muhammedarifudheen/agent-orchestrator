@@ -113,6 +113,13 @@ def test_a_non_message_body_is_an_error_not_a_plan():
         p.plan(INTENTS, TOOLS)
 
 
+def test_the_planners_default_client_also_refuses_the_removed_auth_token_variable(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok")
+    with pytest.raises(AnthropicAPIError, match="ANTHROPIC_AUTH_TOKEN is set but no longer supported; set ANTHROPIC_API_KEY."):
+        ClaudePlanner().plan(INTENTS, TOOLS)  # no client injected: builds AnthropicHTTP() from the environment
+
+
 def test_building_the_client_without_a_key_fails_loudly_and_never_calls_out(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(AnthropicAPIError, match="no_api_key"):

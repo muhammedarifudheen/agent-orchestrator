@@ -21,62 +21,6 @@ from learning.apply import apply_approved, waiting
 from learning.patchfmt import make_proposal, sha256_bytes
 from pipeline_helpers import layout_in
 
-# -- step timing (D17): which step of a test waits? ---------------------------------------------------------------
-# Every subprocess call (git ...), the repo copy and the generator run are timed per test. A test that spends more than
-# 75% of ITS OWN budget (1.5 s of the default 2 s; 22.5 s of an explicit 30 s) gets its breakdown appended to
-# .perf/slow_apply_tests.txt, so the file stays empty unless something unusual happens; with APPLY_TIMING_LOG=<file>
-# every test's breakdown is appended (JSON lines), which is how the 20-run experiment in D17 was done.
-NEAR_BUDGET = 0.75
-
-
-@pytest.fixture(autouse=True)
-def step_timing(request, monkeypatch):
-    rows: list[tuple[str, float]] = []
-    me = sys.modules[__name__]
-
-    def timed(label, fn):
-        depth = [0]  # shutil.copytree calls itself for every sub-directory: record only the outermost call
-
-        def wrapper(*args, **kwargs):
-            t0 = time.perf_counter()
-            depth[0] += 1
-            try:
-                return fn(*args, **kwargs)
-            finally:
-                depth[0] -= 1
-                if depth[0] == 0:
-                    rows.append((label(args), round(time.perf_counter() - t0, 3)))
-        return wrapper
-
-    def cmd_label(args):
-        cmd = args[0] if args else ""
-        if isinstance(cmd, list) and cmd[:1] == ["git"]:
-            rest = [c for c in cmd[1:] if c not in ("-C",) and not str(c).startswith(("C:", "/"))]
-            return "git " + " ".join(map(str, rest[:2]))
-        return "subprocess " + (str(cmd[0]) if isinstance(cmd, list) and cmd else "?")
-
-    monkeypatch.setattr(subprocess, "run", timed(cmd_label, subprocess.run))
-    monkeypatch.setattr(shutil, "copytree", timed(lambda a: "copytree", shutil.copytree))
-    monkeypatch.setattr(me, "generate", timed(lambda a: "generate", generate))
-    t0 = time.perf_counter()
-    yield rows
-    total = time.perf_counter() - t0
-    record = {"test": request.node.name, "total_s": round(total, 3), "steps": rows,
-              "steps_s": round(sum(r[1] for r in rows), 3)}
-    try:
-        import conftest
-        marker = request.node.get_closest_marker("budget")
-        if total > NEAR_BUDGET * (float(marker.args[0]) if marker else 2.0):
-            conftest.PERF_DIR.mkdir(parents=True, exist_ok=True)
-            with open(conftest.PERF_DIR / "slow_apply_tests.txt", "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record) + chr(10))
-        if os.environ.get("APPLY_TIMING_LOG"):
-            with open(os.environ["APPLY_TIMING_LOG"], "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record) + chr(10))
-    except Exception:  # a diagnostic must never fail a test
-        pass
-
-
 NEW_RULE = ('      - {when: {status: 404}, code: NOT_FOUND, retryable: false, recovery: agent, '
             'meaning: "No weather data for these coordinates"}\n')
 ANCHOR = 'meaning: "Coordinates were rejected by the weather service"}\n'
@@ -170,8 +114,8 @@ def rejected_reason(proposals: Path, patch: Path) -> str:
     return (proposals / "rejected" / f"{patch.name}.reason.txt").read_text(encoding="utf-8")
 
 
-# BUDGET: promotes through the pipeline's subprocess gates (staged + promoted, 2 pytest runs each): ~8-10 s normally; 30 s trips on a ~3x slowdown
-@pytest.mark.budget(30)
+# BUDGET (D17, measured over 15 full-suite runs): max(2*p95, median+2) = 13.5 s; median 5.99, p95 6.71, max 7.12
+@pytest.mark.budget(13.5)
 def test_approved_green_proposal_is_applied_regenerated_and_committed(project, tmp_path):
     layout, proposals = project, tmp_path / "proposals"
     patch = propose(layout, proposals, "approved", with_rule(layout))
@@ -299,8 +243,8 @@ def test_missing_spec_is_rejected(project, tmp_path):
     assert snapshot(layout) == before and head(layout) == count
 
 
-# BUDGET: staged verification runs the pipeline's subprocess gates (generated tests go red at the first one): ~4-5 s normally; 30 s trips on a ~6x slowdown
-@pytest.mark.budget(30)
+# BUDGET (D17, measured over 15 full-suite runs): max(2*p95, median+2) = 3.6 s; median 1.56, p95 1.71, max 1.77
+@pytest.mark.budget(3.6)
 def test_red_verification_is_rejected_nothing_promoted_and_not_committed(project, tmp_path):
     layout, proposals = project, tmp_path / "proposals"
     # legitimate-looking type correction that breaks the spec's own examples: latitude 28.61 is no integer
@@ -342,8 +286,8 @@ def _inject_second_verify(monkeypatch, layout, second):
     return calls, seen
 
 
-# BUDGET: the staged verification is the real subprocess gate (~4-5 s); the second verify is injected
-@pytest.mark.budget(30)
+# BUDGET (D17, measured over 15 full-suite runs): max(2*p95, median+2) = 6 s; median 2.80, p95 2.96, max 2.97
+@pytest.mark.budget(6)
 def test_second_verify_red_restores_spec_server_tests_and_leaves_the_proposal_approved(project, tmp_path, monkeypatch):
     layout, proposals = project, tmp_path / "proposals"
     patch = propose(layout, proposals, "approved", with_rule(layout))

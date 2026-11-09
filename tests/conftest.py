@@ -78,6 +78,22 @@ def pytest_sessionfinish(session, exitstatus):
         print(f"perf capture skipped: {type(exc).__name__}: {exc}")
 
 
+# -- per-step timing for budgeted tests (D17): see tests/step_timing.py -------------------------------------
+TIMED_MODULES = {"test_apply"}  # these are timed in full; every test with @pytest.mark.budget(N) is timed anywhere
+
+
+@pytest.fixture(autouse=True)
+def timed_steps(request, monkeypatch):
+    if not (request.node.get_closest_marker("budget") or request.module.__name__.split(".")[-1] in TIMED_MODULES):
+        yield
+        return
+    import step_timing
+    rows = step_timing.install(monkeypatch)
+    t0 = time.perf_counter()
+    yield rows
+    step_timing.finish(request, rows, time.perf_counter() - t0, PERF_DIR)
+
+
 # -- gate tests: offline and time-boxed (D17) ------------------------------------------------------------
 sys.path.insert(0, str(Path(__file__).parent.parent / "offline_guard"))
 import guard  # noqa: E402  (offline_guard/guard.py)

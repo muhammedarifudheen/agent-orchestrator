@@ -100,6 +100,32 @@ def test_a_tool_input_that_is_not_an_object_is_refused():
         client.extract(TEXT)
 
 
+AUTH_TOKEN_MESSAGE = "ANTHROPIC_AUTH_TOKEN is set but no longer supported; set ANTHROPIC_API_KEY."
+
+
+def test_auth_token_without_an_api_key_is_a_loud_error_naming_the_fix_at_startup(monkeypatch):
+    """The removed SDK fallback must not fail silently: no request is made, and the message says what to set."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok-that-used-to-work")
+    with pytest.raises(AnthropicAPIError) as exc:
+        AnthropicHTTP()
+    assert AUTH_TOKEN_MESSAGE in str(exc.value) and "tok-that-used-to-work" not in str(exc.value)
+    with pytest.raises(IngestError) as via_doc:
+        HttpDocExtractionClient()
+    assert AUTH_TOKEN_MESSAGE in str(via_doc.value)
+    with pytest.raises(IngestError, match="ANTHROPIC_AUTH_TOKEN is set but no longer supported"):
+        ingest(TEXT)  # the pipeline's default path (no client given) fails the same way, before any network call
+
+
+def test_an_api_key_wins_when_both_variables_are_set_and_neither_variable_is_ever_sent_as_a_bearer(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok")
+    fake = FakeAnthropicTransport((200, tool_use_message(TOOL_NAME, REPORT)))
+    HttpDocExtractionClient(AnthropicHTTP(transport=fake)).extract(TEXT)  # key read from the environment
+    [req] = fake.requests
+    assert req.headers["x-api-key"] == KEY and "authorization" not in req.headers
+
+
 def test_without_a_key_the_default_client_fails_loudly_and_never_calls_out(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)

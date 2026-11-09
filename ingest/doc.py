@@ -157,14 +157,11 @@ class HttpDocExtractionClient(MessagesDocClient):
 
     def __init__(self, client: Any = None, model: str | None = None) -> None:
         if client is None:
-            key = os.environ.get("ANTHROPIC_API_KEY")
-            if not key:
-                raise IngestError("ANTHROPIC_API_KEY is not set: doc ingestion calls the Claude API. Set the key, or "
-                                  "pass client=... (tests use ingest.testing.StubDocExtractionClient).")
             try:
-                client = AnthropicHTTP(key)
+                client = AnthropicHTTP()  # reads ANTHROPIC_API_KEY; refuses ANTHROPIC_AUTH_TOKEN with a message naming the fix
             except AnthropicAPIError as exc:
-                raise IngestError(f"could not create the Claude API client: {exc}") from exc
+                raise IngestError(f"doc ingestion calls the Claude API and cannot start: {exc} (or pass client=...; "
+                                  "tests use ingest.testing.StubDocExtractionClient)") from exc
         super().__init__(client, model)
 
 

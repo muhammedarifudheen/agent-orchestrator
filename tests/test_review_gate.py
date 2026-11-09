@@ -89,8 +89,8 @@ def test_the_generator_itself_refuses_a_needs_review_spec(tmp_path):
         load_spec(path)
 
 
-# BUDGET: spawns the pipeline's subprocess pytest gates (staged + promoted, 2 runs each): ~7-9 s normally; 30 s trips on a ~4x slowdown
-@pytest.mark.budget(30)
+# BUDGET (D17, measured over 15 full-suite runs): max(2*p95, median+2) = 13.4 s; median 5.87, p95 6.69, max 6.85
+@pytest.mark.budget(13.4)
 def test_reviewed_and_approved_spec_then_generates_and_passes_the_contract_test(tmp_path):
     layout = layout_in(tmp_path)
     blocked = process(drop(layout.inbox, spec_with("gateok", read_op(confidence=0.5))), layout)

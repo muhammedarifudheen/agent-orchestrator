@@ -26,7 +26,8 @@ class AnthropicAPIError(RuntimeError):
     """The API answered with a non-2xx status, or with something that is not a Messages response."""
 
     def __init__(self, status: int, kind: str, message: str) -> None:
-        super().__init__(f"HTTP {status} {kind}: {message}")
+        # status 0 = never reached the API (a configuration error): no "HTTP 0" noise in the message
+        super().__init__(f"HTTP {status} {kind}: {message}" if status else f"{kind}: {message}")
         self.status, self.kind = status, kind
 
 
@@ -64,6 +65,11 @@ class AnthropicHTTP:
                  transport: httpx.BaseTransport | None = None, timeout: float = 120.0) -> None:
         key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         if not key:
+            if os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+                # The SDK accepted this variable (sent as a bearer token); this client sends `x-api-key` only. Failing to
+                # authenticate silently would be worse than refusing to start, so say exactly what to do.
+                raise AnthropicAPIError(0, "unsupported_auth_token",
+                                        "ANTHROPIC_AUTH_TOKEN is set but no longer supported; set ANTHROPIC_API_KEY.")
             raise AnthropicAPIError(0, "no_api_key", "ANTHROPIC_API_KEY is not set")
         self._api_key = key  # never logged, never put in an error message
         self._http = httpx.Client(base_url=base_url, transport=transport, timeout=timeout)
