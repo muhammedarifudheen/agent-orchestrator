@@ -248,12 +248,52 @@ implemented them. Change them here first, then in code.
   of two tests ~2,800 s and a recommended budget of 5,506 s. Each run now has its own log; a run more than 3x the median run
   is excluded whole and named; a record above 10x its own budget is dropped; the failing test names of a run are printed
   (a bare "1 error" hid them). The slow-run capture also fired on that run (437x the median) and `median.txt` stayed sane.
-  Today's numbers on this host (2026-11-10, same code as the table above): the suite takes ~110-119 s instead of ~79 s
-  (a consistent ~1.4x, five runs, not a blip); `--runs 5` recommends 18.2 / 19.1 / 14.9 / 14.9 / 9.4 / 7.0 / 4.0 s for the
-  seven tests (6 of 7 differ by more than 20% from the current 13.4 / 13.5 / 11.9 / 11.7 / 6.0 / 3.6 / 3.4), and `--verify`
-  shows 1.4x-2.0x headroom (smallest: `second_verify`, 72% of its budget). Two earlier full runs that day each ended with
-  `1 error` and are UNEXPLAINED (the script did not print test names yet; three later runs were clean). The budgets in (6)
-  have NOT been changed: adopting a new set is a human decision about which host state to size for (see the report).
+  Today's numbers on this host (2026-11-10, same code as the table above): the suite takes ~97-119 s instead of ~79 s
+  (a consistent ~1.2-1.4x over 16 runs, not a blip); `--runs 5` recommended 18.2 / 19.1 / 14.9 / 14.9 / 9.4 / 7.0 / 4.0 s
+  for the seven tests, 6 of 7 more than 20% above the current budgets. Those are LOADED-STATE numbers and were deliberately
+  NOT adopted: see (8).
+  (8) THE RULE: budgets are sized for a QUIET-STATE baseline and a budget's job is to catch a REGRESSION, not to absorb host
+  load. Sized for today's slow host, tomorrow's normal looks like a regression; sized for a loaded run, a real 3x code
+  regression hides under the budget. Hence a budget is not a single number: strict by default, and a separate loaded-host
+  gate. Budgets are sized for a quiet-state baseline; loaded hosts use `--verify --allow-loaded` with a 3x multiplier; a real
+  slowdown on a quiet host is still caught by name. `--allow-loaded` runs the suite with `BUDGET_MULTIPLIER=3` (read by the
+  gate guard in `tests/conftest.py`; it can only LOOSEN, never below 1, and a strict run scrubs any inherited value), so a
+  loaded host does not fail the suite by name; the slow-run capture and `.perf/slow_tests.txt` still fire, and the report
+  splits "over the quiet-state budget, tolerated here" from "over even the 3x allowance (a real problem on any host)". It
+  is refused without `--verify` (budgets are never re-derived on a loaded host). The seven budgets in (6) are the quiet-state
+  ones (2026-11-09); today's recommendations differ because the HOST differed (all seven old tests ran at 1.42-1.46x their
+  quiet medians that day), not because the tests did. Per-test work done instead of raising numbers: the two most expensive
+  tests were SPLIT, because each ran 4-5 real pytest subprocesses for coverage that other tests already give for real.
+  `test_reviewed_and_approved_spec_then_generates_and_passes_the_contract_test` (5.87 s) became the review-gate flow with the
+  two verification gates stubbed and recorded (`..._flows_through_the_gate_and_is_generated`, ~0.3 s: staged first with the
+  reviewed spec, then the promoted files) plus ONE real subprocess running the identical contract test on an approved
+  generated server (`test_the_identical_contract_test_passes_on_an_approved_generated_server`, 1.4 s quiet estimate, budget
+  3.2 s). `test_approved_green_proposal_is_applied_regenerated_and_committed` (5.99 s) became the same apply flow with
+  `pipeline._verify` stubbed and recorded (`test_approved_proposal_is_applied_regenerated_and_committed`, 0.9 s quiet
+  estimate; git-bound, budget 4.2 s) plus the original end-to-end body, now `@pytest.mark.slow`
+  (`..._end_to_end_with_the_real_verification`, 6 s): EXCLUDED from the default run, never silently (a visible SKIP with the
+  reason in `-rs`; `--runslow` or `RUN_SLOW=1` runs it, and it passes). What the exclusion costs: the real green
+  post-promotion verification inside `apply` is no longer in the default run; its parts are, for real, in
+  `test_second_verify_red_*` (a real staged verification, green) and `test_pipeline.py` (the same `_verify` on promoted
+  files). The two new budgets are ESTIMATES of the quiet state: measured 15 runs on 2026-11-10 on a host 1.44x slower than
+  the baseline day (medians 1.72 and 1.36 s, p95 1.83 and 2.97 s) and divided by 1.44; the widest tail is the apply flow
+  (p95 = 2.2x median, the step that grew was `git config`, a process spawn; cause beyond that unproven). Default suite
+  after the change: ~97-101 s on today's host versus ~110 s before.
+  (9) The "1 error" mystery, closed. Observed twice (2026-11-10, in two of ~12 full runs) before the script named failing
+  tests. Not reproduced in 10 further full runs with the new reporting (569 passed, 23 skipped, no ERROR/FAILED line in any;
+  `--runs 10` log in `.perf`). Reproduced under deliberate load (4 CPU burners, strict budgets): `2 errors` and pytest's own
+  output holds exactly 2 `GATE TEST TOO SLOW` messages (test_red_verification 4.5 s of 3.6 s, test_second_verify 8.0 s of
+  6 s), 0 `FAILED`, no other error text; an earlier, heavier run (suite 2.5x slower) gave 22 errors, all budget-guard
+  errors by the same signature. With 12 burners and `--verify --allow-loaded` (suite 312 s, 3.1x slower) the suite was
+  green and the report listed the 5 tests over their quiet-state budget as tolerated. So a bare `N errors` in this suite
+  IS the budget guard firing on a slow host. What is NOT known: which test the two original occurrences were (they
+  predate the reporting). The next occurrence will name itself. A related environment event, also recorded: one final
+  verification run of this change took 479 s with 5 budget errors AND one real failure, `subprocess.TimeoutExpired ... timed
+  out after -267.8 seconds` in `test_imports_as_package_module[zippopotamus_server]`: a NEGATIVE elapsed time, i.e. the
+  system clock moved backwards ~4.5 minutes mid-run (sleep/wake or a time resync), like the 47,090 s run; the re-run on the
+  settled machine was clean (569 passed, 115.8 s). A failure with a negative duration is the clock, not the code.
+  (10) AUDIT.md does not exist in this repo (never did, per git history); the decision log is this section. The next package
+  (Package 7) creates AUDIT.md, and its decision-log row for `scripts/measure_budgets.py` points to D17 (items (6)-(9)).
   Slow-run duration capture is automatic going forward (`tests/perf_capture.py`, hooks in `tests/conftest.py`): after every
   run of >= 50 tests the wall time is compared with the median of the last 5 comparable runs (test count within
   0.8x-1.25x); above 2x that median (and with >= 2 prior comparable runs: a median of two is their mean, and a false positive costs a

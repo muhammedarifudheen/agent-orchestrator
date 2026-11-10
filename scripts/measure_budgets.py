@@ -9,6 +9,12 @@ script is how a different host (CI, a laptop) re-derives them, and how any host 
                                                     print it next to the CURRENT budget and flag any test whose recommendation
                                                     differs by more than 20% (the signal to update D17). With N >= 5 a one-line
                                                     summary is appended to .perf/budget_history.jsonl (RECORD).
+  python scripts/measure_budgets.py --verify --allow-loaded
+                                                    the same on a LOADED host: the suite runs with BUDGET_MULTIPLIER=3 (every
+                                                    gate budget x3, so a loaded host does not fail the suite by name; the
+                                                    slow-run capture still fires) and the report separates "over the quiet-state
+                                                    budget (tolerated here)" from "over even the 3x allowance (a real problem)".
+                                                    The default --verify stays strict.
   python scripts/measure_budgets.py --verify        VERIFY: run the suite ONCE; print every timed test's headroom, and for any
                                                     test above 75% of its budget: name, time, budget and how many standard
                                                     deviations above the recorded median (scripts/budget_baseline.json, the D17
@@ -46,6 +52,7 @@ RECORD_MIN_RUNS = 5      # runs >= this are recorded in .perf/budget_history.jso
 MIN_STDEV = 0.05         # a floor for the baseline's standard deviation (a test with no spread would divide by ~0)
 SUSPEND_FACTOR = 3.0     # a run whose wall time is > this x the median run is excluded (a laptop that slept mid-run once
                          # produced a 47,090 s run and a recommended budget of 5,506 s)
+LOADED_MULTIPLIER = 3.0  # --allow-loaded: budgets stay sized for a QUIET host; a loaded host gets this allowance, not new numbers
 IMPLAUSIBLE = 10.0       # a single record above this x its own budget is dropped as a suspend/hang, not a measurement
 
 
@@ -166,8 +173,11 @@ def load_baseline(path: Path) -> dict[str, dict[str, float]]:
         return {}
 
 
-def verify(records: list[dict[str, Any]], baseline: dict[str, dict[str, float]]) -> tuple[str, list[dict[str, Any]]]:
-    """Headroom of every timed test today, and the near-budget ones with their distance from the recorded median."""
+def verify(records: list[dict[str, Any]], baseline: dict[str, dict[str, float]],
+           allow_loaded: bool = False) -> tuple[str, list[dict[str, Any]]]:
+    """Headroom of every timed test today, and the near-budget ones with their distance from the recorded median.
+    `allow_loaded`: the suite was run with budgets x3; additionally split the over-budget tests into "tolerated on a
+    loaded host" (<= 3x the quiet-state budget) and "over even the loaded allowance"."""
     rows = []
     for r in records:
         base = baseline.get(r["test"])
@@ -195,14 +205,34 @@ def verify(records: list[dict[str, Any]], baseline: dict[str, dict[str, float]])
     else:
         out.append(f"No timed test is above {NEAR:.0%} of its budget. Smallest headroom today: "
                    f"{min((x['headroom'] for x in rows), default=float('nan')):.1f}x slowdown before the first failure.")
+    if allow_loaded:
+        over = [x for x in rows if x["frac"] > 1.0]
+        beyond = [x for x in over if x["frac"] > LOADED_MULTIPLIER]
+        tolerated = [x for x in over if x["frac"] <= LOADED_MULTIPLIER]
+        out.append("")
+        out.append(f"LOADED-HOST MODE: every gate budget was multiplied by {LOADED_MULTIPLIER:g} for this run "
+                   "(BUDGET_MULTIPLIER), so the suite could not fail by name on a budget. Budgets are still sized for a "
+                   "quiet host: on a normal host the tests below are bugs, on a loaded one they are expected.")
+        if tolerated:
+            out.append(f"  OVER THE QUIET-STATE BUDGET, within the {LOADED_MULTIPLIER:g}x allowance (tolerated here): {len(tolerated)}")
+            for x in tolerated:
+                out.append(f"    {x['test']}: {x['time']:.2f} s against a {x['budget']:g} s budget ({x['frac']:.1f}x)")
+        if beyond:
+            out.append(f"  OVER EVEN THE LOADED ALLOWANCE ({LOADED_MULTIPLIER:g}x): {len(beyond)}  <- a real problem on any host")
+            for x in beyond:
+                out.append(f"    {x['test']}: {x['time']:.2f} s against a {x['budget']:g} s budget ({x['frac']:.1f}x)")
+        if not over:
+            out.append("  No timed test exceeded its quiet-state budget in this run.")
     return "\n".join(out), near
 
 
 # -- running the suite ----------------------------------------------------------------------------------------------
 
-def run_suite(log: Path, extra: list[str]) -> tuple[int, float, str, list[str]]:
+def run_suite(log: Path, extra: list[str], env_extra: dict[str, str] | None = None) -> tuple[int, float, str, list[str]]:
     """(exit code, wall seconds, summary line, the FAILED/ERROR lines of pytest's short summary)."""
-    env = {**os.environ, "STEP_TIMING_LOG": str(log)}
+    env = {**os.environ, "STEP_TIMING_LOG": str(log), **(env_extra or {})}
+    if not (env_extra or {}).get("BUDGET_MULTIPLIER"):
+        env.pop("BUDGET_MULTIPLIER", None)  # a strict run is strict even if the caller's shell exported a multiplier
     t0 = __import__("time").perf_counter()
     done = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *extra], cwd=ROOT, env=env,
                           capture_output=True, text=True)
@@ -217,12 +247,17 @@ def main(argv: list[str] | None = None) -> int:
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--runs", type=int, help="RE-DERIVE: run the full suite this many times (default 15)")
     mode.add_argument("--verify", action="store_true", help="VERIFY: one run, headroom + near-budget report")
+    ap.add_argument("--allow-loaded", action="store_true",
+                    help=f"with --verify: run the suite with every gate budget x{LOADED_MULTIPLIER:g} (a loaded host); budgets "
+                         "are NOT re-derived and the strict default is unchanged")
     ap.add_argument("--from-log", type=Path, help="analyse an existing STEP_TIMING_LOG instead of running pytest")
     ap.add_argument("--emit-baseline", action="store_true", help="print baseline JSON (stdout only, nothing is written)")
     ap.add_argument("--baseline", type=Path, default=DEFAULT_BASELINE)
     ap.add_argument("--perf-dir", type=Path, default=DEFAULT_PERF)
     ap.add_argument("pytest_args", nargs="*", help="extra arguments passed to pytest (default: the whole suite)")
     args = ap.parse_args(argv)
+    if args.allow_loaded and not args.verify:
+        ap.error("--allow-loaded only applies to --verify (budgets are never re-derived on a loaded host)")
 
     suite_s: list[float] = []
     exit_codes: list[int] = []
@@ -237,7 +272,8 @@ def main(argv: list[str] | None = None) -> int:
         per_run: list[dict[str, Any]] = []
         for i in range(runs):
             log = workdir / f"run{i + 1}.jsonl"           # one log per run, so a bad run can be excluded whole
-            code, secs, summary, failures = run_suite(log, args.pytest_args)
+            env_extra = {"BUDGET_MULTIPLIER": f"{LOADED_MULTIPLIER:g}"} if args.allow_loaded else None
+            code, secs, summary, failures = run_suite(log, args.pytest_args, env_extra)
             exit_codes.append(code)
             print(f"run {i + 1}/{runs}: {summary or 'no summary'} ({secs:.0f} s)", flush=True)
             for failure in failures:                      # say WHICH test: a bare "1 error" hides the evidence
@@ -258,8 +294,9 @@ def main(argv: list[str] | None = None) -> int:
         print("NOTE:", note)
 
     if args.verify:
-        text, near = verify(records, load_baseline(args.baseline))
-        print(f"\nVERIFY on {host_info()['host']} ({host_info()['cpu']}), suite exit code {exit_codes[0] if exit_codes else 'n/a'}\n")
+        text, near = verify(records, load_baseline(args.baseline), allow_loaded=args.allow_loaded)
+        mode = f"LOADED-HOST (budgets x{LOADED_MULTIPLIER:g})" if args.allow_loaded else "STRICT"
+        print(f"\nVERIFY [{mode}] on {host_info()['host']} ({host_info()['cpu']}), suite exit code {exit_codes[0] if exit_codes else 'n/a'}\n")
         print(text)
         return 0 if not exit_codes or exit_codes[0] == 0 else exit_codes[0]
 

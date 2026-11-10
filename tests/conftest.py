@@ -106,6 +106,31 @@ GATE_MODULES = {"test_review_gate", "test_pipeline", "test_pipeline_fixtures", "
 DEFAULT_BUDGET_S = 2.0
 
 
+def budget_multiplier() -> float:
+    """BUDGET_MULTIPLIER (env) scales every gate budget; it can only LOOSEN them (never below 1). Set by
+    `scripts/measure_budgets.py --verify --allow-loaded` (x3) so that a loaded host does not fail the suite by name; budgets
+    stay sized for a QUIET host and a default run is strict (D17)."""
+    try:
+        return max(1.0, float(os.environ.get("BUDGET_MULTIPLIER", "1")))
+    except ValueError:
+        return 1.0
+
+
+# -- slow tests: excluded from the default run, never silently (D17) --------------------------------------------
+def pytest_addoption(parser):
+    parser.addoption("--runslow", action="store_true", default=False,
+                     help="also run tests marked @pytest.mark.slow (excluded from the default run, CLAUDE.md D17)")
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--runslow") or os.environ.get("RUN_SLOW") == "1":
+        return
+    skip = pytest.mark.skip(reason="slow: excluded from the default run; pass --runslow (CLAUDE.md D17)")
+    for item in items:
+        if "slow" in item.keywords:
+            item.add_marker(skip)  # a visible SKIP with a reason in `-rs`, never a silent drop
+
+
 def budget_violation(nodeid: str, elapsed: float, budget: float) -> str | None:
     """The failure message when a gate test overran its budget, else None. Names the test and the duration."""
     if elapsed <= budget:
@@ -123,7 +148,7 @@ def gate_guard(request):
         yield
         return
     marker = request.node.get_closest_marker("budget")
-    budget = float(marker.args[0]) if marker else DEFAULT_BUDGET_S
+    budget = (float(marker.args[0]) if marker else DEFAULT_BUDGET_S) * budget_multiplier()
     uninstall = guard.install()
     started = time.perf_counter()
     try:

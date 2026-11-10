@@ -94,7 +94,7 @@ def test_exactly_75_percent_is_not_near_and_a_clean_run_reports_the_smallest_hea
 def test_the_baseline_file_holds_the_d17_medians_for_every_explicitly_budgeted_test():
     base = mb.load_baseline(mb.DEFAULT_BASELINE)
     assert len(base) >= 9 and all(v["median"] > 0 and v["stdev"] > 0 and v["n"] == 15 for v in base.values())
-    green = base["test_approved_green_proposal_is_applied_regenerated_and_committed"]
+    green = base["test_approved_proposal_is_applied_end_to_end_with_the_real_verification"]
     assert green["median"] == pytest.approx(5.99, abs=0.01)
     assert mb.load_baseline(Path("/nonexistent/baseline.json")) == {}, "a missing baseline degrades to 'no baseline'"
 
@@ -190,7 +190,7 @@ def test_main_survives_a_sleeping_run_and_the_table_and_history_stay_sane(tmp_pa
     walls = [80.0, 82.0, 47090.0, 79.0, 81.0]
     calls = []
 
-    def fake_run_suite(log, extra):
+    def fake_run_suite(log, extra, env_extra=None):
         i = len(calls)
         calls.append(log)
         t = 3000.0 if i == 2 else 5.0 + 0.1 * i
@@ -210,3 +210,86 @@ def test_main_survives_a_sleeping_run_and_the_table_and_history_stay_sane(tmp_pa
     assert line["recommended"]["test_heavy"] < 30, "a sane budget, not thousands of seconds"
     assert code == 1, "the suite did fail in the excluded run, and the exit code still says so"
     assert "ERROR tests/t.py::test_x - budget" in out, "a failing run names the failing test instead of only counting it"
+
+
+# -- --verify --allow-loaded: a separate, looser gate for a loaded host ----------------------------
+
+def test_allow_loaded_separates_tolerated_over_budget_tests_from_ones_over_even_3x():
+    records = [rec("t_ok", 5.0, 10.0), rec("t_over", 20.0, 10.0), rec("t_way_over", 31.0, 10.0)]
+    strict, _ = mb.verify(records, BASE)
+    assert "LOADED-HOST MODE" not in strict, "the default report is the strict one"
+    text, near = mb.verify(records, BASE, allow_loaded=True)
+    assert "LOADED-HOST MODE: every gate budget was multiplied by 3" in text
+    assert "on a normal host the tests below are bugs, on a loaded one they are expected" in text
+    tolerated = text.split("OVER THE QUIET-STATE BUDGET")[1].split("OVER EVEN THE LOADED ALLOWANCE")[0]
+    assert "t_over: 20.00 s against a 10 s budget (2.0x)" in tolerated and "t_way_over" not in tolerated
+    beyond = text.split("OVER EVEN THE LOADED ALLOWANCE")[1]
+    assert "t_way_over: 31.00 s against a 10 s budget (3.1x)" in beyond and "t_over:" not in beyond
+    assert "t_ok" not in text.split("LOADED-HOST MODE")[1], "a test inside its budget is not mentioned in the loaded section"
+    assert mb.verify([rec("t_ok", 5.0, 10.0)], BASE, allow_loaded=True)[0].endswith("No timed test exceeded its quiet-state budget in this run.")
+
+
+def test_exactly_3x_is_tolerated_and_anything_above_is_not():
+    text, _ = mb.verify([rec("t_edge", 30.0, 10.0), rec("t_beyond", 30.1, 10.0)], BASE, allow_loaded=True)
+    assert "t_edge: 30.00 s" in text.split("OVER THE QUIET-STATE BUDGET")[1].split("OVER EVEN")[0]
+    assert "t_beyond: 30.10 s" in text.split("OVER EVEN THE LOADED ALLOWANCE")[1]
+
+
+def test_the_flag_reaches_the_suite_as_a_budget_multiplier_only_with_verify_allow_loaded(tmp_path, monkeypatch, capsys):
+    seen = []
+
+    def fake_run_suite(log, extra, env_extra=None):
+        seen.append(env_extra)
+        Path(log).write_text(json.dumps(rec("t", 5.0, 10.0)) + chr(10), encoding="utf-8")
+        return 0, 80.0, "fake", []
+
+    monkeypatch.setattr(mb, "run_suite", fake_run_suite)
+    assert mb.main(["--verify", "--allow-loaded", "--perf-dir", str(tmp_path)]) == 0
+    assert mb.main(["--verify", "--perf-dir", str(tmp_path)]) == 0
+    assert seen == [{"BUDGET_MULTIPLIER": "3"}, None], "strict by default: no multiplier is passed"
+    out = capsys.readouterr().out
+    assert "VERIFY [LOADED-HOST (budgets x3)]" in out and "VERIFY [STRICT]" in out
+
+
+@pytest.mark.parametrize("argv", [["--allow-loaded"], ["--runs", "5", "--allow-loaded"]])
+def test_allow_loaded_is_refused_outside_verify(argv, capsys, monkeypatch):
+    def never(*a, **k):  # if the guard regressed, fail fast instead of launching a real 15-run suite measurement
+        raise AssertionError("the suite must not start: --allow-loaded was not refused")
+
+    monkeypatch.setattr(mb, "run_suite", never)
+    with pytest.raises(SystemExit) as exc:
+        mb.main(argv)
+    assert exc.value.code == 2 and "--allow-loaded only applies to --verify" in capsys.readouterr().err
+
+
+def test_a_strict_run_scrubs_a_multiplier_inherited_from_the_callers_shell(monkeypatch, tmp_path):
+    """run_suite builds the child env: without --allow-loaded BUDGET_MULTIPLIER must NOT leak through."""
+    monkeypatch.setenv("BUDGET_MULTIPLIER", "3")
+    captured = {}
+
+    class Done:
+        stdout, returncode = "1 passed in 0.1s", 0
+
+    def fake_subprocess_run(cmd, **kw):
+        captured["env"] = kw["env"]
+        return Done()
+
+    monkeypatch.setattr(mb.subprocess, "run", fake_subprocess_run)
+    mb.run_suite(tmp_path / "log.jsonl", [])
+    assert "BUDGET_MULTIPLIER" not in captured["env"]
+    mb.run_suite(tmp_path / "log.jsonl", [], {"BUDGET_MULTIPLIER": "3"})
+    assert captured["env"]["BUDGET_MULTIPLIER"] == "3"
+
+
+def test_conftest_multiplier_only_ever_loosens_budgets(monkeypatch):
+    import conftest
+    monkeypatch.delenv("BUDGET_MULTIPLIER", raising=False)
+    assert conftest.budget_multiplier() == 1.0
+    for value, expected in (("3", 3.0), ("1.5", 1.5), ("0.5", 1.0), ("0", 1.0), ("-4", 1.0), ("abc", 1.0), ("", 1.0)):
+        monkeypatch.setenv("BUDGET_MULTIPLIER", value)
+        assert conftest.budget_multiplier() == expected, value
+    monkeypatch.setenv("BUDGET_MULTIPLIER", "3")
+    # a 5 s test against a 2 s default budget fails strict and passes under the loaded allowance (2 s x 3 = 6 s)
+    assert conftest.budget_violation("t", 5.0, 2.0) is not None
+    assert conftest.budget_violation("t", 5.0, 2.0 * conftest.budget_multiplier()) is None
+    assert conftest.budget_violation("t", 6.1, 2.0 * conftest.budget_multiplier()) is not None

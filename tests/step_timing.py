@@ -68,7 +68,8 @@ def finish(request, rows: list[tuple[str, float]], total: float, perf_dir: Path)
     try:
         marker = request.node.get_closest_marker("budget")
         budget = float(marker.args[0]) if marker else DEFAULT_BUDGET_S
-        record = {"test": request.node.name, "total_s": round(total, 3), "budget_s": budget, "steps": rows,
+        record = {"test": request.node.name, "total_s": round(total, 3), "budget_s": budget,
+                  "multiplier": float(os.environ.get("BUDGET_MULTIPLIER", "1") or 1), "steps": rows,
                   "steps_s": round(sum(r[1] for r in rows), 3)}
         if total > NEAR_BUDGET * budget:
             perf_dir.mkdir(parents=True, exist_ok=True)

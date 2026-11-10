@@ -1,5 +1,5 @@
 {
- "_about": "Recorded wall times (seconds) of the explicitly budgeted tests in 15 full-suite runs on the host below; the same numbers as the D17 table in CLAUDE.md. Read by scripts/measure_budgets.py --verify. Never written by the script: update by hand after a re-derivation (scripts/measure_budgets.py --runs 15 --emit-baseline).",
+ "_about": "Recorded wall times (seconds) of the explicitly budgeted tests in 15 full-suite runs on the host below; the same numbers as the D17 table in CLAUDE.md. Read by scripts/measure_budgets.py --verify. Never written by the script: update by hand after a re-derivation (scripts/measure_budgets.py --runs 15 --emit-baseline). Two entries (estimated: true) are quiet-state ESTIMATES: 15 runs on 2026-11-10 divided by 1.44, the ratio by which that day's host ran slower than 2026-11-09. The end-to-end apply test is marked slow (excluded from the default run).",
  "host": "LAPTOP-R6MKJL2U",
  "date": "2026-11-09",
  "runs": 15,
@@ -7,11 +7,6 @@
   "test_a_spec_whose_own_tests_fail_is_rolled_back_and_never_promoted": {
    "median": 1.305,
    "stdev": 0.143,
-   "n": 15
-  },
-  "test_approved_green_proposal_is_applied_regenerated_and_committed": {
-   "median": 5.993,
-   "stdev": 0.369,
    "n": 15
   },
   "test_clean_read_spec_is_generated_verified_and_promoted": {
@@ -39,15 +34,27 @@
    "stdev": 0.091,
    "n": 15
   },
-  "test_reviewed_and_approved_spec_then_generates_and_passes_the_contract_test": {
-   "median": 5.865,
-   "stdev": 0.35,
-   "n": 15
-  },
   "test_second_verify_red_restores_spec_server_tests_and_leaves_the_proposal_approved": {
    "median": 2.796,
    "stdev": 0.119,
    "n": 15
+  },
+  "test_approved_proposal_is_applied_end_to_end_with_the_real_verification": {
+   "median": 5.993,
+   "stdev": 0.369,
+   "n": 15
+  },
+  "test_approved_proposal_is_applied_regenerated_and_committed": {
+   "median": 0.944,
+   "stdev": 0.55,
+   "n": 15,
+   "estimated": true
+  },
+  "test_the_identical_contract_test_passes_on_an_approved_generated_server": {
+   "median": 1.194,
+   "stdev": 0.05,
+   "n": 15,
+   "estimated": true
   }
  }
 }

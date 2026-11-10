@@ -14,8 +14,9 @@ from pathlib import Path
 import pytest
 import yaml
 
-from generators.from_spec import ROOT, SpecError, load_spec
+from generators.from_spec import ROOT, SpecError, generate, load_spec
 from ingest.common import CONFIDENCE_THRESHOLD
+import pipeline
 from pipeline import process, review_findings
 from pipeline_helpers import drop, layout_in, read_op, spec_with
 
@@ -89,26 +90,57 @@ def test_the_generator_itself_refuses_a_needs_review_spec(tmp_path):
         load_spec(path)
 
 
-# BUDGET (D17, measured over 15 full-suite runs): max(2*p95, median+2) = 13.4 s; median 5.87, p95 6.69, max 6.85
-@pytest.mark.budget(13.4)
-def test_reviewed_and_approved_spec_then_generates_and_passes_the_contract_test(tmp_path):
-    layout = layout_in(tmp_path)
-    blocked = process(drop(layout.inbox, spec_with("gateok", read_op(confidence=0.5))), layout)
-    assert blocked.status == "review" and nothing_generated(layout, "gateok")
-
-    # a person reviews the draft, fixes nothing, clears the flag and signs it
-    draft_path = layout.inbox / "review" / "gateok.spec.yaml"
+def _review_and_approve(layout, name="gateok"):
+    """A person reviews the blocked draft, fixes nothing, clears the flag and signs it; returns the approved file."""
+    blocked = process(drop(layout.inbox, spec_with(name, read_op(confidence=0.5))), layout)
+    assert blocked.status == "review" and nothing_generated(layout, name)
+    draft_path = layout.inbox / "review" / f"{name}.spec.yaml"
     draft = yaml.safe_load(draft_path.read_text(encoding="utf-8"))
     op = draft["operations"][0]
     op["needs_review"] = False
     op["review"] = {"source": op["review"]["source"], "safety_fields": "reviewed", "reviewer": "A. Reviewer"}
-    approved = layout.inbox / "gateok.yaml"
+    approved = layout.inbox / f"{name}.yaml"
     approved.write_text(yaml.safe_dump(draft, sort_keys=False), encoding="utf-8")
+    return approved
 
-    outcome = process(approved, layout)
+
+def test_reviewed_and_approved_spec_flows_through_the_gate_and_is_generated(tmp_path, monkeypatch):
+    """The review-gate FLOW (blocked -> reviewed -> approved -> generated). The pipeline's two verification gates are
+    replaced by a recorder here: they run for real in test_pipeline.py and in the contract test below (split from one
+    ~6 s test that did all of it, D17)."""
+    calls = []
+
+    def fake_verify(layout, name, servers_dir, tests_dir, spec_dir):
+        staged_spec = Path(spec_dir) / f"{name}.yaml"
+        calls.append({"name": name, "servers": Path(servers_dir), "specs": Path(spec_dir),
+                      "spec_text": staged_spec.read_text(encoding="utf-8") if staged_spec.exists() else None})
+        return True, "stub"
+
+    monkeypatch.setattr(pipeline, "_verify", fake_verify)
+    layout = layout_in(tmp_path)
+    outcome = process(_review_and_approve(layout), layout)
     assert outcome.status == "generated", outcome.detail
     assert outcome.tools == ["gateok__get_item"]
     assert not nothing_generated(layout, "gateok")
+    # verified twice, STAGED first (the approved spec, reviewer named) and then on the promoted files
+    assert [c["name"] for c in calls] == ["gateok", "gateok"]
+    assert layout.inbox / ".staging" in calls[0]["servers"].parents and "A. Reviewer" in calls[0]["spec_text"]
+    assert calls[1]["servers"] == layout.servers and calls[1]["specs"] == layout.specs
+
+
+# BUDGET (D17): max(2*p95, median+2) = 3.2 s on QUIET-STATE estimates: 15 runs on 2026-11-10 (median 1.72, p95 1.83,
+# max 1.85) on a host running 1.44x slower than the 2026-11-09 quiet baseline, divided by 1.44 -> median 1.19, p95 1.27.
+# One real pytest subprocess. Not today's loaded numbers: an estimate of the quiet state.
+@pytest.mark.budget(3.2)
+def test_the_identical_contract_test_passes_on_an_approved_generated_server(tmp_path):
+    layout = layout_in(tmp_path)
+    spec = spec_with("gateok", read_op(confidence=0.5))
+    op = spec["operations"][0]
+    op["needs_review"] = False
+    op["review"] = {"source": op["review"]["source"], "safety_fields": "reviewed", "reviewer": "A. Reviewer"}
+    spec_path = layout.specs / "gateok.yaml"
+    spec_path.write_text(yaml.safe_dump(spec, sort_keys=False), encoding="utf-8")
+    generate(spec_path, layout.servers, layout.tests)
 
     # independent evidence: the identical tests/test_contract.py, run again by this test on the promoted files
     env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(layout.servers), str(ROOT / "servers"), str(ROOT)]),

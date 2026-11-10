@@ -30,7 +30,7 @@ GENERATED = [
 
 
 @pytest.mark.parametrize("fixture,kind,name,tools,stub", GENERATED, ids=[g[1] for g in GENERATED])
-# BUDGET (D17, measured over 15 full-suite runs): max(2*p95, median+2) = 11.9 s; median 4.82, p95 5.93, max 6.56 (worst case: doc)
+# BUDGET (D17, measured over 15 full-suite runs, quiet host, 2026-11-09): max(2*p95, median+2) = 11.9 s; median 4.82, p95 5.93, max 6.56 (worst case: doc)
 @pytest.mark.budget(11.9)
 def test_fixture_is_ingested_generated_verified_and_matches_the_committed_spec(tmp_path, fixture, kind, name, tools, stub):
     layout = layout_in(tmp_path)

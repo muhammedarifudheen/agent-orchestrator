@@ -114,9 +114,60 @@ def rejected_reason(proposals: Path, patch: Path) -> str:
     return (proposals / "rejected" / f"{patch.name}.reason.txt").read_text(encoding="utf-8")
 
 
-# BUDGET (D17, measured over 15 full-suite runs): max(2*p95, median+2) = 13.5 s; median 5.99, p95 6.71, max 7.12
+# BUDGET (D17): max(2*p95, median+2) = 4.2 s on QUIET-STATE estimates: 15 runs on 2026-11-10 (median 1.36, p95 2.97,
+# max 3.50) on a host running 1.44x slower than the 2026-11-09 quiet baseline (the 7 older budgeted tests all ran at
+# 1.42-1.46x their quiet medians that day), divided by 1.44 -> median 0.94, p95 2.06. Git-spawn-bound (~13 git processes);
+# widest tail of the heavy tests (p95 = 2.2x median; the step that grew was `git config`, a process spawn).
+@pytest.mark.budget(4.2)
+def test_approved_proposal_is_applied_regenerated_and_committed(project, tmp_path, monkeypatch):
+    """What apply does when verification is GREEN: patch, stage, generate, promote, commit, move the proposal. The two
+    verifications are replaced by a recorder (they run for real in the slow end-to-end test below, in
+    test_second_verify_red_* (a real staged verification, green) and in test_pipeline.py); this test pins the ORDER and
+    the ARGUMENTS of those calls and everything apply does around them (split from one ~6 s test, D17)."""
+    import pipeline
+    verifications = []
+
+    def fake_verify(layout_, name, servers_dir, tests_dir, spec_dir):
+        staged = Path(spec_dir) / f"{name}.yaml"
+        verifications.append({"name": name, "servers": Path(servers_dir), "tests": Path(tests_dir), "specs": Path(spec_dir),
+                              "staged_has_the_rule": staged.exists() and "NOT_FOUND" in staged.read_text(encoding="utf-8")})
+        return True, "stub"
+
+    monkeypatch.setattr(pipeline, "_verify", fake_verify)
+    layout, proposals = project, tmp_path / "proposals"
+    patch = propose(layout, proposals, "approved", with_rule(layout))
+    before, sha_before = commits(layout), head(layout)
+
+    [result] = apply_approved(proposals, layout)
+
+    assert result.status == "applied", result.reason
+    spec = yaml.safe_load(spec_text(layout))
+    rules = {r["code"]: r for r in spec["operations"][0]["errors"]}
+    assert rules["NOT_FOUND"]["when"] == {"status": 404}
+    assert generate(layout.specs / "weather.yaml", layout.servers, layout.tests, check=True) == []
+    assert "NOT_FOUND" in (layout.servers / "weather_server.py").read_text(encoding="utf-8")
+    assert commits(layout) == before + 1 and head(layout) != sha_before, "exactly one new commit; HEAD moved"
+    assert git(layout.root, "status", "--porcelain", "--untracked-files=no", "--", "specs", "servers", "tests") == ""
+    assert (proposals / "applied" / patch.name).exists() and not patch.exists()
+    assert not (layout.inbox / ".staging" / "weather-learn").exists()
+    subject, *changed = git(layout.root, "show", "--name-only", "--format=%s", "HEAD").splitlines()  # one git call
+    assert subject == f"learn: apply {patch.name} to weather"
+    assert {"specs/weather.yaml", "servers/weather_server.py", "tests/test_weather.py"} <= set(changed)
+    # verified twice, in this order: first the STAGED copy (already carrying the patch), then the promoted real files
+    assert [v["name"] for v in verifications] == ["weather", "weather"]
+    staged_root = layout.inbox / ".staging" / "weather-learn"
+    assert verifications[0]["servers"] == staged_root / "servers" and verifications[0]["specs"] == staged_root / "specs"
+    assert verifications[0]["staged_has_the_rule"] is True
+    assert verifications[1]["servers"] == layout.servers and verifications[1]["specs"] == layout.specs
+    assert verifications[1]["tests"] == layout.tests
+
+
+# BUDGET (D17, quiet host 2026-11-09, 15 full-suite runs, measured for this body when it was the only green-path test):
+# max(2*p95, median+2) = 13.5 s; median 5.99, p95 6.71, max 7.12. SLOW: 4 real pytest subprocesses (2 staged, 2 promoted);
+# excluded from the default run (skipped with a reason, `--runslow` to run it).
+@pytest.mark.slow
 @pytest.mark.budget(13.5)
-def test_approved_green_proposal_is_applied_regenerated_and_committed(project, tmp_path):
+def test_approved_proposal_is_applied_end_to_end_with_the_real_verification(project, tmp_path):
     layout, proposals = project, tmp_path / "proposals"
     patch = propose(layout, proposals, "approved", with_rule(layout))
     before, sha_before = commits(layout), head(layout)
@@ -243,7 +294,7 @@ def test_missing_spec_is_rejected(project, tmp_path):
     assert snapshot(layout) == before and head(layout) == count
 
 
-# BUDGET (D17, measured over 15 full-suite runs): max(2*p95, median+2) = 3.6 s; median 1.56, p95 1.71, max 1.77
+# BUDGET (D17, measured over 15 full-suite runs, quiet host, 2026-11-09): max(2*p95, median+2) = 3.6 s; median 1.56, p95 1.71, max 1.77
 @pytest.mark.budget(3.6)
 def test_red_verification_is_rejected_nothing_promoted_and_not_committed(project, tmp_path):
     layout, proposals = project, tmp_path / "proposals"
@@ -286,7 +337,7 @@ def _inject_second_verify(monkeypatch, layout, second):
     return calls, seen
 
 
-# BUDGET (D17, measured over 15 full-suite runs): max(2*p95, median+2) = 6 s; median 2.80, p95 2.96, max 2.97
+# BUDGET (D17, measured over 15 full-suite runs, quiet host, 2026-11-09): max(2*p95, median+2) = 6 s; median 2.80, p95 2.96, max 2.97
 @pytest.mark.budget(6)
 def test_second_verify_red_restores_spec_server_tests_and_leaves_the_proposal_approved(project, tmp_path, monkeypatch):
     layout, proposals = project, tmp_path / "proposals"
