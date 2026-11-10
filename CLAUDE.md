@@ -229,12 +229,31 @@ implemented them. Change them here first, then in code.
   Tails: for every test max/p95 was <= 1.11 (isolated runs: <= 1.16), so the "max > 3x p95" rule never fired and there
   is no unproven tail. What the tail is made of: each pipeline gate is a pytest subprocess costing a steady 1.2 s (median
   1.15-1.24, p95 1.37-1.61, max 1.48-1.67), no single step dominates; the largest per-test excess in the slowest runs
-  was 0.1-0.35 s on one subprocess. The prediction this formula makes, stated so it can be falsified: a heavy test needs a
-  ~2.3x slowdown of the whole host to fail its budget. That has happened once in the runs recorded here (one loaded full
-  run took 207 s against ~80-110 s, with `[openapi]` at 12.1 s against its new 11.9 s budget), and then it SHOULD fail, by name,
-  with the slow-run capture and `.perf/slow_tests.txt` filled in. The same quiet host gave 4.8 s for `[doc]` here and 7.5 s in
-  an earlier full run: the difference between those two runs is host load, not the suite's context (the isolated 9-test runs
-  agree with the in-suite ones when the host is quiet).
+  was 0.1-0.35 s on one subprocess. The prediction this formula made, stated so it
+  could be falsified: "a heavy test needs a ~2.3x slowdown of the whole host to fail its budget". IT WAS FALSIFIED THE NEXT DAY
+  (see (7)): at a suite-wide slowdown of only ~1.8x three budgeted tests failed by name, because the slowdown is not uniform
+  across steps (`copytree` 0.08 -> 0.97 s, 12x; a pytest subprocess 1.2 -> 2.0-4.4 s, up to 3.6x; `git status` 0.09 -> 0.7 s, 8x),
+  and `second_verify` (median 2.8 s, mostly one subprocess plus file work) went to 9.2 s, 3.3x, against a 6.0 s budget.
+  (6) is therefore a measurement of ONE host state (quiet), not a guarantee of headroom.
+  (7) `scripts/measure_budgets.py` is the portability mechanism; budgets are HOST-RELATIVE (they are mostly process creation
+  and file work). Three modes, and it NEVER edits a test file, CLAUDE.md or the baseline (a test checks the source has exactly
+  one write site, the append-only history): `--runs N` re-derives (runs the full suite N times with per-step timing, applies
+  the formula, prints the table next to the CURRENT budget and flags any test that differs by more than 20%: the signal to
+  update the markers by hand and the table above); `--verify` runs the suite once and prints every timed test's headroom
+  today plus, for any test above 75% of its budget, the time, the budget and how many standard deviations above the median
+  recorded here (`scripts/budget_baseline.json`, the table above in machine-readable form; `--emit-baseline` prints a new
+  one to stdout); with `--runs >= 5` a one-line summary (host, CPU, run count, table hash, date, recommendations) is appended
+  to `.perf/budget_history.jsonl`, so a CI failure can be triaged against a known baseline. Hygiene learned the hard way:
+  during the first real `--runs 5` the laptop SLEPT mid-run and one suite run took 47,090 s (13 hours), which made the p95
+  of two tests ~2,800 s and a recommended budget of 5,506 s. Each run now has its own log; a run more than 3x the median run
+  is excluded whole and named; a record above 10x its own budget is dropped; the failing test names of a run are printed
+  (a bare "1 error" hid them). The slow-run capture also fired on that run (437x the median) and `median.txt` stayed sane.
+  Today's numbers on this host (2026-11-10, same code as the table above): the suite takes ~110-119 s instead of ~79 s
+  (a consistent ~1.4x, five runs, not a blip); `--runs 5` recommends 18.2 / 19.1 / 14.9 / 14.9 / 9.4 / 7.0 / 4.0 s for the
+  seven tests (6 of 7 differ by more than 20% from the current 13.4 / 13.5 / 11.9 / 11.7 / 6.0 / 3.6 / 3.4), and `--verify`
+  shows 1.4x-2.0x headroom (smallest: `second_verify`, 72% of its budget). Two earlier full runs that day each ended with
+  `1 error` and are UNEXPLAINED (the script did not print test names yet; three later runs were clean). The budgets in (6)
+  have NOT been changed: adopting a new set is a human decision about which host state to size for (see the report).
   Slow-run duration capture is automatic going forward (`tests/perf_capture.py`, hooks in `tests/conftest.py`): after every
   run of >= 50 tests the wall time is compared with the median of the last 5 comparable runs (test count within
   0.8x-1.25x); above 2x that median (and with >= 2 prior comparable runs: a median of two is their mean, and a false positive costs a

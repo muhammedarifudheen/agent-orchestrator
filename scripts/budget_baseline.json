@@ -1,0 +1,53 @@
+{
+ "_about": "Recorded wall times (seconds) of the explicitly budgeted tests in 15 full-suite runs on the host below; the same numbers as the D17 table in CLAUDE.md. Read by scripts/measure_budgets.py --verify. Never written by the script: update by hand after a re-derivation (scripts/measure_budgets.py --runs 15 --emit-baseline).",
+ "host": "LAPTOP-R6MKJL2U",
+ "date": "2026-11-09",
+ "runs": 15,
+ "tests": {
+  "test_a_spec_whose_own_tests_fail_is_rolled_back_and_never_promoted": {
+   "median": 1.305,
+   "stdev": 0.143,
+   "n": 15
+  },
+  "test_approved_green_proposal_is_applied_regenerated_and_committed": {
+   "median": 5.993,
+   "stdev": 0.369,
+   "n": 15
+  },
+  "test_clean_read_spec_is_generated_verified_and_promoted": {
+   "median": 4.983,
+   "stdev": 0.386,
+   "n": 15
+  },
+  "test_fixture_is_ingested_generated_verified_and_matches_the_committed_spec[doc]": {
+   "median": 4.822,
+   "stdev": 0.498,
+   "n": 15
+  },
+  "test_fixture_is_ingested_generated_verified_and_matches_the_committed_spec[openapi]": {
+   "median": 4.816,
+   "stdev": 0.472,
+   "n": 15
+  },
+  "test_fixture_is_ingested_generated_verified_and_matches_the_committed_spec[trace]": {
+   "median": 5.089,
+   "stdev": 0.352,
+   "n": 15
+  },
+  "test_red_verification_is_rejected_nothing_promoted_and_not_committed": {
+   "median": 1.564,
+   "stdev": 0.091,
+   "n": 15
+  },
+  "test_reviewed_and_approved_spec_then_generates_and_passes_the_contract_test": {
+   "median": 5.865,
+   "stdev": 0.35,
+   "n": 15
+  },
+  "test_second_verify_red_restores_spec_server_tests_and_leaves_the_proposal_approved": {
+   "median": 2.796,
+   "stdev": 0.119,
+   "n": 15
+  }
+ }
+}
