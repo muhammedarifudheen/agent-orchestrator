@@ -143,7 +143,13 @@ def test_capture_never_raises_even_when_the_perf_dir_cannot_be_written(tmp_path)
 
 # -- the pytest hooks in conftest.py --------------------------------------------------------------
 
-def run_hooks(monkeypatch, tmp_path, total, record=None):
+def fake_session(interrupted=()):
+    """What the conftest hooks read from a pytest session: config (plugin lookup, interruption list) and exitstatus."""
+    config = NS(pluginmanager=NS(get_plugin=lambda name: None), _env_interruptions=list(interrupted))
+    return NS(config=config, exitstatus=0)
+
+
+def run_hooks(monkeypatch, tmp_path, total, record=None, interrupted=()):
     """Drive the real hooks with a fake clock: sessionstart at 0, sessionfinish at `total` seconds."""
     ticks = iter([0.0, total])
     # private hook state: the REAL run's durations (conftest._perf) must not be reset or polluted by this test
@@ -152,10 +158,11 @@ def run_hooks(monkeypatch, tmp_path, total, record=None):
     monkeypatch.setattr(conftest, "PERF_DIR", tmp_path)
     if record is not None:
         monkeypatch.setattr(pc, "record_run", record)
-    conftest.pytest_sessionstart(None)
+    session = fake_session(interrupted)
+    conftest.pytest_sessionstart(session)
     for i in range(N):
         conftest.pytest_runtest_logreport(NS(nodeid=f"tests/t.py::t{i}", when="call", duration=i / 100))
-    conftest.pytest_sessionfinish(None, 0)
+    conftest.pytest_sessionfinish(session, 0)
 
 
 def test_the_hooks_feed_the_real_total_and_per_test_durations_to_the_capture(monkeypatch, tmp_path):

@@ -289,11 +289,56 @@ implemented them. Change them here first, then in code.
   IS the budget guard firing on a slow host. What is NOT known: which test the two original occurrences were (they
   predate the reporting). The next occurrence will name itself. A related environment event, also recorded: one final
   verification run of this change took 479 s with 5 budget errors AND one real failure, `subprocess.TimeoutExpired ... timed
-  out after -267.8 seconds` in `test_imports_as_package_module[zippopotamus_server]`: a NEGATIVE elapsed time, i.e. the
-  system clock moved backwards ~4.5 minutes mid-run (sleep/wake or a time resync), like the 47,090 s run; the re-run on the
-  settled machine was clean (569 passed, 115.8 s). A failure with a negative duration is the clock, not the code.
+  out after -267.8 seconds` in `test_imports_as_package_module[zippopotamus_server]`. CORRECTED (an earlier version of this
+  paragraph said the clock moved backwards; that was wrong): the test passed `timeout=60` and CPython prints the REMAINING
+  time (`deadline - now`) in that exception, so the monotonic clock had run 267.8 s PAST the deadline while the call was
+  blocked: the process or the machine was PAUSED (sleep, VM pause), as in the 47,090 s run. The re-run on the settled
+  machine was clean (569 passed, 115.8 s). See (12).
   (10) AUDIT.md does not exist in this repo (never did, per git history); the decision log is this section. The next package
   (Package 7) creates AUDIT.md, and its decision-log row for `scripts/measure_budgets.py` points to D17 (items (6)-(9)).
+  (11) THE DEFAULT RUN IS ADAPTIVE, BY AN EXPLICIT CHOICE, NOT A GUESS ABOUT THE HOST. Budgets are quiet-state; overruns are
+  warnings in default mode and failures in --strict-budgets; the log is .perf/overruns.jsonl. Auto-loosening on a slow host
+  would erase the regression signal (a 3x code slowdown on a quiet host and a 1.4x load event would look alike), and
+  "tell contributors to pass a flag" fails because a first plain `pytest -q` that fails by name teaches distrust. So: the
+  budget never moves; its CONSEQUENCE is chosen. `tests/budget_policy.py` + the gate guard in `tests/conftest.py`: a plain
+  `pytest` prints a "budget overrun warnings" section naming each test, its time, its budget, the multiple of the budget and the
+  multiple of its quiet-state median (`scripts/budget_baseline.json`), exits 0 on that alone, and appends a line to
+  `.perf/overruns.jsonl` (ts, host, mode, run_id, test, elapsed, budget, ratio_to_budget, quiet_median, ratio_to_quiet_median);
+  `pytest --strict-budgets` (or `STRICT_BUDGETS=1`) fails the same overrun by name with the old "GATE TEST TOO SLOW" message and
+  logs it with mode "strict". CI uses `--strict-budgets` and that is the run that gates merges; README.md carries the three
+  contributor-facing lines. `scripts/measure_budgets.py --verify` still means strict (it passes `--strict-budgets`); `--runs`
+  only measures; `--allow-loaded` (x3, D17 (8)) remains for strict runs on a loaded host. Demonstrated on the same host, same 37
+  tests (`test_apply.py` + `test_pipeline.py`), 36 CPU burners on 12 logical cores: default run, exit 0, `37 passed, 1 skipped`
+  plus 3 warnings (e.g. `test_second_verify_red_...` 9.1 s against a 6 s budget = 1.5x the budget, 3.2x its quiet median); strict
+  run, exit 1, `5 errors`, each a named `GATE TEST TOO SLOW`; 8 lines in `.perf/overruns.jsonl` (3 warn, 5 strict). Lighter load
+  did not produce an overrun at all: 4 burners left a sequential test at quiet speed, 12 burners slowed these tests ~2x, still inside
+  every budget. A plain run can of course still fail for non-budget reasons.
+  (12) Environmental interruptions are not test failures. Negative elapsed time = environmental clock event, not a test failure;
+  the test was marked environmental-interruption and the run reported as invalid for budget purposes. What was seen (a
+  subprocess "timed out after -267.8 seconds", see (9)) is a PAUSE of the process or machine, which advances both clocks, so
+  comparing clocks cannot see it; `tests/clock_guard.py` therefore uses four signals: negative elapsed time, a negative remaining
+  time in a failure's text, a wall/monotonic disagreement above 5 s, and a heartbeat thread (0.5 s ticks) whose gaps above 5 s
+  mean the process was not scheduled (heavy CPU load does not do that: the 36-burner runs never tripped it). Handling, in
+  `tests/conftest.py`: a FAILED test in such a window is reported as SKIPPED "environmental interruption: <reason>; run_id=...";
+  a passing one stays passed; the budget check is skipped for that test; the closing line becomes
+  `INVALID RUN (clock event): N environmental interruption(s), run_id=..., <the usual counts>` instead of opening with the pass
+  count; the exit status is non-zero (an invalid run is never green, so CI cannot pass on one); the run is not recorded in
+  `.perf/history.json` (and `scripts/measure_budgets.py` excludes a run whose summary says INVALID RUN). Proven without a real clock jump:
+  a probe test monkeypatches the elapsed-time computation to -267.8 and raises the exact `TimeoutExpired ... -267.8`; the runner
+  must refuse to fail it (`tests/test_budget_policy.py`, 7 mutations caught). Known cost: a REAL failure that happens to coincide with a
+  pause is also turned into a skip, but the run is flagged invalid and exits 1, and a re-run shows it. Hazard found while writing
+  the tests: a test that fakes a clock (patching `time.monotonic` or `clock_guard.elapsed`) is itself seen by the real detector
+  and was reported as an interruption of the run that ran it, which also masked one of its failures; fake clocks must be
+  INJECTED (`Heartbeat(clock=...)`, a start time in the future), never patched globally.
+  (13) `second_verify` is NOT the load-sensitive test, and gets no different treatment. 15 isolated runs of
+  `test_second_verify_red_...` under load (seconds; quiet baseline 2026-11-09: median 2.80, p95 2.96, max 2.97): 4 burners
+  2.77 / 2.88 / 2.88 (1.03x the quiet median: no effect); 12 burners 4.32 / 5.03 / 5.24 (p95 = 1.8x); 36 burners 6.00 / 12.50 /
+  25.57, where 14 of 15 runs are 5.5-6.9 s (2.0-2.5x, the same range as the other six: `red_verification` 4.0x, `clean_read`
+  3.6x in the same session) and ONE run took 25.7 s (the whole pytest process 46 s: CPU starvation, not a pause, so the detector
+  correctly did not call it an interruption). The p95 of 12.5 s is above the 3x trigger (8.4 s) only because of that single run;
+  the rule says to size such a test at quiet-p95 x 2, which is the 6.0 s it already has, so its budget is unchanged. The earlier
+  2.9x-3.3x readings (8.0 s and 9.2 s in loaded full-suite runs) are the same heavy-load behaviour that every budgeted test shows, not a
+  property of this test.
   Slow-run duration capture is automatic going forward (`tests/perf_capture.py`, hooks in `tests/conftest.py`): after every
   run of >= 50 tests the wall time is compared with the median of the last 5 comparable runs (test count within
   0.8x-1.25x); above 2x that median (and with >= 2 prior comparable runs: a median of two is their mean, and a false positive costs a

@@ -146,11 +146,17 @@ def exclude_interrupted_runs(runs: list[dict[str, Any]]) -> tuple[list[dict[str,
     """`runs`: [{"wall": seconds, "records": [...]}, ...]. Needs >= 3 runs to judge; a run whose wall time is more than
     SUSPEND_FACTOR x the median of all runs is excluded WHOLE (its records are not evidence of normal speed)."""
     notes: list[str] = []
-    if len(runs) < 3:
-        return runs, notes
-    median = statistics.median(r["wall"] for r in runs)
+    valid = []
+    for i, r in enumerate(runs, 1):  # pytest itself said the run is not valid evidence (a clock event, tests/conftest.py)
+        if r.get("invalid"):
+            notes.append(f"run {i} EXCLUDED: pytest reported INVALID RUN (clock event): {r['invalid']}")
+        else:
+            valid.append((i, r))
+    if len(valid) < 3:
+        return [r for _, r in valid], notes
+    median = statistics.median(r["wall"] for _, r in valid)
     kept = []
-    for i, r in enumerate(runs, 1):
+    for i, r in valid:
         if r["wall"] > SUSPEND_FACTOR * median:
             notes.append(f"run {i} EXCLUDED: {r['wall']:.0f} s against a median run of {median:.0f} s "
                          f"(> {SUSPEND_FACTOR:g}x; the machine most likely slept or hung)")
@@ -237,7 +243,7 @@ def run_suite(log: Path, extra: list[str], env_extra: dict[str, str] | None = No
     done = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *extra], cwd=ROOT, env=env,
                           capture_output=True, text=True)
     lines = (done.stdout or "").splitlines()
-    summary = next((ln for ln in reversed(lines) if " passed" in ln or " failed" in ln), "")
+    summary = next((ln for ln in reversed(lines) if " passed" in ln or " failed" in ln or "INVALID RUN" in ln), "")
     failures = [ln.strip() for ln in lines if ln.startswith(("FAILED ", "ERROR "))]
     return done.returncode, __import__("time").perf_counter() - t0, summary.strip(), failures
 
@@ -273,12 +279,14 @@ def main(argv: list[str] | None = None) -> int:
         for i in range(runs):
             log = workdir / f"run{i + 1}.jsonl"           # one log per run, so a bad run can be excluded whole
             env_extra = {"BUDGET_MULTIPLIER": f"{LOADED_MULTIPLIER:g}"} if args.allow_loaded else None
-            code, secs, summary, failures = run_suite(log, args.pytest_args, env_extra)
+            strict = ["--strict-budgets"] if args.verify else []  # --verify is the strict check; --runs only measures
+            code, secs, summary, failures = run_suite(log, [*strict, *args.pytest_args], env_extra)
             exit_codes.append(code)
             print(f"run {i + 1}/{runs}: {summary or 'no summary'} ({secs:.0f} s)", flush=True)
             for failure in failures:                      # say WHICH test: a bare "1 error" hides the evidence
                 print(f"    {failure[:200]}", flush=True)
-            per_run.append({"wall": secs, "records": load_records(log) if log.exists() else []})
+            per_run.append({"wall": secs, "records": load_records(log) if log.exists() else [],
+                            "invalid": summary if "INVALID RUN" in summary else ""})
         kept, notes = exclude_interrupted_runs(per_run)
         suite_s = [r["wall"] for r in kept]
         records = [rec for r in kept for rec in r["records"]]

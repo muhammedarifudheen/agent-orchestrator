@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+import budget_policy
+import clock_guard
 import retail_server
 from errors import ToolFailure
 
@@ -59,6 +61,9 @@ def _perf_clock() -> float:
 def pytest_sessionstart(session):
     _perf["t0"] = _perf_clock()
     _perf["durations"] = {}
+    terminal = session.config.pluginmanager.get_plugin("terminalreporter")
+    if terminal is not None:
+        _mark_invalid_runs_in_the_summary_line(session.config, terminal)
 
 
 def pytest_runtest_logreport(report):
@@ -69,6 +74,12 @@ def pytest_runtest_logreport(report):
 
 
 def pytest_sessionfinish(session, exitstatus):
+    interrupted = getattr(session.config, "_env_interruptions", [])
+    if interrupted:
+        # An invalid run is never green (CI must not pass on one) and is never recorded as evidence about speed.
+        if int(session.exitstatus) == 0:
+            session.exitstatus = pytest.ExitCode.TESTS_FAILED
+        return
     try:
         import perf_capture
         total = _perf_clock() - _perf["t0"]
@@ -94,6 +105,98 @@ def timed_steps(request, monkeypatch):
     step_timing.finish(request, rows, time.perf_counter() - t0, PERF_DIR)
 
 
+# -- budget overruns are warnings unless --strict-budgets; environmental interruptions are never failures (D17) ----------
+def _strict_budgets(config) -> bool:
+    return bool(config.getoption("--strict-budgets")) or os.environ.get("STRICT_BUDGETS") == "1"
+
+
+def _note_interruption(config, nodeid: str, reason: str, outcome_was: str) -> None:
+    if not any(i["test"] == nodeid for i in config._env_interruptions):
+        config._env_interruptions.append({"test": nodeid, "reason": reason, "outcome_was": outcome_was})
+
+
+def pytest_configure(config):
+    config._budget_overruns = []
+    config._env_interruptions = []
+    config._run_id = clock_guard.new_run_id()
+    config._heartbeat = clock_guard.Heartbeat()
+    config._heartbeat.start()
+
+
+def pytest_unconfigure(config):
+    heartbeat = getattr(config, "_heartbeat", None)
+    if heartbeat is not None:
+        heartbeat.stop()
+
+
+def _mark_invalid_runs_in_the_summary_line(config, terminal) -> None:
+    """If any test was an environmental interruption the closing line starts `INVALID RUN (clock event):`, so a
+    maintainer cannot read "568 passed" as a normal result."""
+    original = terminal.build_summary_stats_line
+
+    def build():
+        parts, color = original()
+        interrupted = config._env_interruptions
+        if not interrupted:
+            return parts, color
+        head = (f"INVALID RUN (clock event): {len(interrupted)} environmental interruption(s), run_id={config._run_id}",
+                {"red": True, "bold": True})
+        return [head] + parts, "red"
+
+    terminal.build_summary_stats_line = build
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    item._clock_start = clock_guard.sample()
+    yield
+
+
+def _inspect_call_report(item, report) -> None:
+    """If the test's window was an environmental interruption, record it; a FAILED report is turned into a skip."""
+    start = getattr(item, "_clock_start", None)
+    if start is None:
+        return
+    reason = clock_guard.classify(
+        clock_guard.elapsed(start), item.config._heartbeat.longest_gap_since(start[1]),
+        clock_guard.disagreement(start), report.longreprtext if report.failed else "")
+    if not reason:
+        return
+    _note_interruption(item.config, item.nodeid, reason, report.outcome)
+    if report.failed:  # refuse to FAIL a test on an environmental event: report it, and mark the run invalid
+        report.outcome = "skipped"
+        report.longrepr = (str(item.path), (item.location[1] or 0),
+                           f"Skipped: environmental interruption: {reason}; run_id={item.config._run_id}")
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+    if report.when != "call":
+        return
+    try:
+        _inspect_call_report(item, report)
+    except Exception:  # the detector must never break a run
+        pass
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    interrupted = getattr(config, "_env_interruptions", [])
+    overruns = getattr(config, "_budget_overruns", [])
+    if interrupted:
+        terminalreporter.section(f"ENVIRONMENTAL INTERRUPTIONS (run_id={config._run_id})", sep="!")
+        for item in interrupted:
+            terminalreporter.write_line(f"{item['test']}: {item['reason']} (outcome was: {item['outcome_was']})")
+        terminalreporter.write_line("This run is INVALID for budget purposes: it is not recorded in .perf/history.json and the "
+                                    "exit status is non-zero. Re-run it.")
+    if overruns:
+        terminalreporter.section("budget overrun warnings (not failures, CLAUDE.md D17)", sep="-")
+        for line in overruns:
+            terminalreporter.write_line(line)
+        terminalreporter.write_line(budget_policy.ADVICE)
+
+
 # -- gate tests: offline and time-boxed (D17) ------------------------------------------------------------
 sys.path.insert(0, str(Path(__file__).parent.parent / "offline_guard"))
 import guard  # noqa: E402  (offline_guard/guard.py)
@@ -102,7 +205,8 @@ GATE_MODULES = {"test_review_gate", "test_pipeline", "test_pipeline_fixtures", "
                 "test_doc_unverified", "test_collect", "test_patchfmt",
                 "test_propose", "test_apply", "test_http_status",
                 "test_cross_industry", "test_orchestrator_generality", "test_cross_industry_handoff",
-                "test_retail_failures", "test_planner_wiring", "test_http_pool", "test_perf_capture", "test_doc_http_wiring", "test_measure_budgets"}
+                "test_retail_failures", "test_planner_wiring", "test_http_pool", "test_perf_capture", "test_doc_http_wiring", "test_measure_budgets",
+                "test_budget_policy", "test_probe_budget_overrun"}
 DEFAULT_BUDGET_S = 2.0
 
 
@@ -118,6 +222,9 @@ def budget_multiplier() -> float:
 
 # -- slow tests: excluded from the default run, never silently (D17) --------------------------------------------
 def pytest_addoption(parser):
+    parser.addoption("--strict-budgets", action="store_true", default=False,
+                     help="a time-budget overrun FAILS the test (CI mode). Default: a warning plus a line in "
+                          ".perf/overruns.jsonl (CLAUDE.md D17). STRICT_BUDGETS=1 does the same.")
     parser.addoption("--runslow", action="store_true", default=False,
                      help="also run tests marked @pytest.mark.slow (excluded from the default run, CLAUDE.md D17)")
 
@@ -150,11 +257,26 @@ def gate_guard(request):
     marker = request.node.get_closest_marker("budget")
     budget = (float(marker.args[0]) if marker else DEFAULT_BUDGET_S) * budget_multiplier()
     uninstall = guard.install()
-    started = time.perf_counter()
+    started = clock_guard.sample()
     try:
         yield
     finally:
         uninstall()
-    message = budget_violation(request.node.nodeid, time.perf_counter() - started, budget)
-    if message:
-        pytest.fail(message, pytrace=False)
+    config = request.config
+    elapsed = clock_guard.elapsed(started)
+    reason = clock_guard.classify(elapsed, config._heartbeat.longest_gap_since(started[1]),
+                                  clock_guard.disagreement(started))
+    if reason:  # the machine was paused or the clock misbehaved: not a measurement, not a regression
+        _note_interruption(config, request.node.nodeid, reason, "budget check skipped")
+        return
+    overrun = budget_policy.evaluate(request.node.nodeid, elapsed, budget)
+    if overrun is None:
+        return
+    strict = _strict_budgets(config)
+    try:
+        budget_policy.log(PERF_DIR, overrun, "strict" if strict else "warn", config._run_id, budget_multiplier())
+    except Exception:  # logging must never turn a warning into a failure
+        pass
+    if strict:
+        pytest.fail(budget_violation(request.node.nodeid, elapsed, budget), pytrace=False)
+    config._budget_overruns.append(budget_policy.warning_text(overrun))

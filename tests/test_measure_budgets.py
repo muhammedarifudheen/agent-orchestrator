@@ -293,3 +293,27 @@ def test_conftest_multiplier_only_ever_loosens_budgets(monkeypatch):
     assert conftest.budget_violation("t", 5.0, 2.0) is not None
     assert conftest.budget_violation("t", 5.0, 2.0 * conftest.budget_multiplier()) is None
     assert conftest.budget_violation("t", 6.1, 2.0 * conftest.budget_multiplier()) is not None
+
+
+# -- budget overruns are warnings by default now: --verify keeps the strict meaning, --runs only measures ---------
+
+def test_verify_asks_the_suite_for_the_strict_gate_and_runs_does_not(tmp_path, monkeypatch):
+    seen = []
+
+    def fake_run_suite(log, extra, env_extra=None):
+        seen.append(list(extra))
+        Path(log).write_text(json.dumps(rec("t", 5.0, 10.0)) + chr(10), encoding="utf-8")
+        return 0, 80.0, "fake", []
+
+    monkeypatch.setattr(mb, "run_suite", fake_run_suite)
+    mb.main(["--verify", "--perf-dir", str(tmp_path)])
+    mb.main(["--runs", "1", "--perf-dir", str(tmp_path)])
+    assert seen == [["--strict-budgets"], []]
+
+
+def test_a_run_pytest_reported_as_invalid_is_excluded_even_with_few_runs():
+    runs = [{"wall": 80.0, "records": [], "invalid": ""}, {"wall": 82.0, "records": [],
+            "invalid": "INVALID RUN (clock event): 1 environmental interruption(s), run_id=X, 568 passed in 479s"}]
+    kept, notes = mb.exclude_interrupted_runs(runs)
+    assert [r["wall"] for r in kept] == [80.0]
+    assert len(notes) == 1 and "run 2 EXCLUDED: pytest reported INVALID RUN (clock event)" in notes[0]
