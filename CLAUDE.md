@@ -294,8 +294,8 @@ implemented them. Change them here first, then in code.
   time (`deadline - now`) in that exception, so the monotonic clock had run 267.8 s PAST the deadline while the call was
   blocked: the process or the machine was PAUSED (sleep, VM pause), as in the 47,090 s run. The re-run on the settled
   machine was clean (569 passed, 115.8 s). See (12).
-  (10) AUDIT.md does not exist in this repo (never did, per git history); the decision log is this section. The next package
-  (Package 7) creates AUDIT.md, and its decision-log row for `scripts/measure_budgets.py` points to D17 (items (6)-(9)).
+  (10) AUDIT.md did not exist until Package 7 (2026-11-10), which created it; the decision log remains this section, and
+  AUDIT.md section 4 indexes it. The row for `scripts/measure_budgets.py` is D17 (6)-(9).
   (11) THE DEFAULT RUN IS ADAPTIVE, BY AN EXPLICIT CHOICE, NOT A GUESS ABOUT THE HOST. Budgets are quiet-state; overruns are
   warnings in default mode and failures in --strict-budgets; the log is .perf/overruns.jsonl. Auto-loosening on a slow host
   would erase the regression signal (a 3x code slowdown on a quiet host and a 1.4x load event would look alike), and
@@ -447,6 +447,23 @@ implemented them. Change them here first, then in code.
   that drops them) hands off with ZERO retries (the server saw the charge once, `agent_failures` is empty); a mutation
   that disabled the recovery=human branch is caught by the `human_required` / `agent_recovery_skipped` assertions (D18), and
   the declined handoff reaches `collect.py` with `status: 402`.
+- D21. AUDIT.md and its two tests (Package 7). `AUDIT.md` (repo root) states what the system claims (section 1), what is proven
+  and by which test (2), what is not proven or opt-in (3: claims, every skip individually, precedents, hazards), and indexes
+  D1-D21 (4). It is checked by tests, not by trust. `tests/test_audit_accuracy.py` parses section 2: by DEFAULT it checks that
+  every cited test id still exists (one `--collect-only` subprocess, a few seconds) and that each command matches its ids, so a
+  renamed or deleted test fails naming the claim; running every cited test and requiring PASSED (a skip counts as failure) is
+  the `slow` test (`--runslow`, ~50-180 s), because doing it by default would roughly double the suite. That costs nothing in
+  evidence: each cited test already runs in the normal suite and fails there if it breaks; what the slow test adds is the check
+  that the audit names what actually passes. `tests/test_audit_completeness.py` DISCOVERS every `servers/*_server.py`,
+  `specs/*.yaml`, `learning/*.py`, `ingest/*.py` and `scripts/*.py` (not `__init__.py`) and requires each to appear in exactly one
+  of section 2 `Files covered` or section 3a `Files with NO passing test`: neither is UN-AUDITED, both is a CONTRADICTION, a
+  named file that no longer exists is STALE; probes in tmp_path (a dummy server, spec, learning, ingest and scripts module) prove the scan is dynamic.
+  Granularity rule: a file is "covered" if a passing test exercises it, even where an opt-in live or real-model path of the same
+  file is not proven; that unproven part is a CLAIM in 3a, never a file there. Consequence: adding a system by following
+  docs/ONBOARDING.md fails the completeness test until AUDIT.md gets a row, by design. Section 2 may not cite a test that
+  is skipped by default or a `tests/test_audit_*.py` test (recursion). Findings recorded rather than fixed (no features in
+  this package): no cost/token accounting, no orphan-handoff detection and no `reversible`/`scope` write metadata exist (the write-safety
+  layer is D8/D12/D15); the brief's counts (569 passed / 23 skips / 15 live tests) were stale: 587 / 25 / 14.
 
 ## Architecture: genericity
 
