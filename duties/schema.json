@@ -1,0 +1,105 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Duty: a named, human-reviewed sequence of tool calls with a write boundary and a success criterion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "description", "review", "intent_patterns", "parameters", "steps", "write_boundary", "success", "example"],
+  "definitions": {
+    "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+    "toolname": {"type": "string", "pattern": "^[a-z0-9_]+__[a-z0-9_]+$"},
+    "value": {"type": ["string", "number", "boolean"], "description": "A string starting with $ is a reference; anything else is a literal."},
+    "args": {"type": "object", "additionalProperties": {"$ref": "#/definitions/value"}}
+  },
+  "properties": {
+    "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "Must equal the file stem."},
+    "description": {"type": "string", "minLength": 1},
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reviewer"],
+      "properties": {
+        "status": {"type": "string", "enum": ["reviewed"]},
+        "reviewer": {"type": "string", "minLength": 1}
+      }
+    },
+    "intent_patterns": {
+      "type": "array", "minItems": 1,
+      "items": {"type": "string", "minLength": 1, "description": "Request template; {param} placeholders capture words."}
+    },
+    "parameters": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type"],
+        "properties": {
+          "type": {"type": "string", "enum": ["string"]},
+          "pattern": {"type": "string", "description": "Regex the captured value must fully match."},
+          "transform": {"type": "string", "enum": ["upper", "lower"]}
+        }
+      }
+    },
+    "steps": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "tool", "args"],
+        "properties": {
+          "id": {"$ref": "#/definitions/id"},
+          "tool": {"$ref": "#/definitions/toolname"},
+          "args": {"$ref": "#/definitions/args"},
+          "guard": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["check", "equals"],
+            "properties": {
+              "check": {"type": "string", "pattern": "^\\$"},
+              "equals": {"$ref": "#/definitions/value"}
+            }
+          }
+        }
+      }
+    },
+    "write_boundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["before"],
+      "properties": {"before": {"type": "string", "description": "Step id of the FIRST write-classified step."}}
+    },
+    "success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "check"],
+      "properties": {
+        "name": {"$ref": "#/definitions/id"},
+        "check": {"type": "string", "pattern": "^\\$"},
+        "equals": {"$ref": "#/definitions/value"}
+      }
+    },
+    "example": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intent", "expect"],
+      "properties": {
+        "intent": {"type": "string", "minLength": 1, "description": "May contain $setup.<id>.<path>, substituted by the runner before matching."},
+        "expect": {"type": "string", "enum": ["success"]},
+        "setup": {
+          "type": "array",
+          "description": "Tool calls run first against the fresh mock world; results are addressable as $setup.<id>.<path>.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "tool", "args"],
+            "properties": {
+              "id": {"$ref": "#/definitions/id"},
+              "tool": {"$ref": "#/definitions/toolname"},
+              "args": {"$ref": "#/definitions/args"}
+            }
+          }
+        }
+      }
+    }
+  }
+}

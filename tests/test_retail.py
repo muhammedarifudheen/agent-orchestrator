@@ -48,7 +48,9 @@ async def make_order(sku="SKU-1001", qty=2, cust="C-1001") -> dict:
 async def test_discovery():
     async with Client(mcp) as c:
         tools = (await c.list_tools()).tools
-    assert sorted(t.name for t in tools) == ["charge_payment", "check_inventory", "create_order", "create_shipment"]
+    assert sorted(t.name for t in tools) == [
+        "charge_payment", "check_inventory", "check_refund_eligibility", "create_order", "create_shipment", "issue_refund",
+        "notify_customer", "verify_order"]
     assert all(t.description for t in tools)
 
 

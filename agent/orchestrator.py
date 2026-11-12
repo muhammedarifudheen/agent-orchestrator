@@ -5,6 +5,7 @@ This module is industry-agnostic. Do not add domain-specific logic here (see CLA
 from __future__ import annotations
 
 import getpass
+import inspect
 import json
 import os
 import re
@@ -13,6 +14,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from agent.duties import (DUTY_CONFIDENCE_THRESHOLD, BoundaryEvent, DutyContractError, DutyLibrary, DutyMatch,
+                          allow_reviewed_duty, holds, resolve)
 from agent.tool_registry import SEP, ToolRegistry
 
 DEFAULT_MODEL = os.environ.get("AGENT_MODEL", "claude-sonnet-5-5")
@@ -69,6 +72,11 @@ class ExecutionState:
     # the wording of the handoff reason and of the unknown-recovery fail-safe, which also stops at once.
     human_required: bool = False
     agent_recovery_skipped: bool = False  # the failure said a person is needed, so no agent retry/self-correction was offered
+    # Duty layer (D22). `duty` describes what happened to the duty that matched (or the closest one that did not);
+    # `duty_contract_failed` names a duty whose contract failed while it ran; `write_boundary` records the crossing.
+    duty: dict[str, Any] | None = None
+    duty_contract_failed: str | None = None
+    write_boundary: dict[str, Any] | None = None
 
     def note(self, line: str) -> None:
         self.log.append(line)
@@ -105,6 +113,10 @@ class Handoff:
     # Present in the JSON ONLY when the recovery=human branch fired; omitted otherwise (see _handoff_json).
     human_required: bool | None = None
     agent_recovery_skipped: bool | None = None
+    # Present in the JSON ONLY when the duty layer was involved (see _handoff_json), so their presence means something.
+    duty: dict[str, Any] | None = None
+    duty_contract_failed: str | None = None
+    write_boundary: dict[str, Any] | None = None
 
     def to_text(self) -> str:
         lines = ["=" * 70, "HUMAN HANDOFF REQUIRED", "=" * 70,
@@ -135,6 +147,8 @@ class RunResult:
     final_message: str
     state: ExecutionState
     handoff: Handoff | None = None
+    duty_used: str | None = None  # the duty that completed this run (None: the planner did the work)
+    duty_contract_failed: str | None = None  # a duty whose contract failed while it ran (the planner took over)
 
 
 class Orchestrator:
@@ -150,6 +164,10 @@ class Orchestrator:
         handoff_dir: Path | None = None,
         user_id: str | None = None,
         on_log: Callable[[str], None] | None = None,
+        duties: DutyLibrary | None | str = "auto",
+        duty_threshold: float = DUTY_CONFIDENCE_THRESHOLD,
+        write_gate: Callable[[BoundaryEvent], Any] = allow_reviewed_duty,
+        run_log_dir: Path | None = None,
     ) -> None:
         if client is None:
             from anthropic import AsyncAnthropic  # reads ANTHROPIC_API_KEY
@@ -160,6 +178,9 @@ class Orchestrator:
         self.handoff_dir = handoff_dir
         self.user_id = re.sub(r"[^A-Za-z0-9_.-]", "_", user_id or getpass.getuser()) or "unknown"
         self._on_log = on_log or (lambda _l: None)
+        # Duties are discovered from duties/ ("auto"), passed in, or switched off (None). Nothing here names one (D22).
+        self.duties = DutyLibrary() if duties == "auto" else duties
+        self.duty_threshold, self.write_gate, self.run_log_dir = duty_threshold, write_gate, run_log_dir
 
     async def run(self, goal: str) -> RunResult:
         state = ExecutionState(goal=goal)
@@ -171,8 +192,19 @@ class Orchestrator:
             return self._escalate(state, "No tools available (all MCP servers failed to connect: "
                                   f"{self.registry.connect_errors}).", "")
 
+        preface = ""
+        if self.duties is not None and len(self.duties):
+            outcome = await self._try_duty(state, goal)
+            if isinstance(outcome, RunResult):
+                return outcome
+            preface = outcome  # "" = no duty ran; otherwise what the planner must know about the duty that stopped
+        return await self._plan_and_act(state, goal, tools, preface)
+
+    async def _plan_and_act(self, state: ExecutionState, goal: str, tools: list[dict[str, Any]],
+                            preface: str) -> RunResult:
+        """The planner path: the model chooses the tools. Also continues a run a duty handed back."""
         system = SYSTEM_PROMPT.format(today=date.today().isoformat())
-        messages: list[dict[str, Any]] = [{"role": "user", "content": goal}]
+        messages: list[dict[str, Any]] = [{"role": "user", "content": goal + preface}]
         last_text = ""
 
         while state.steps < self.max_steps:
@@ -198,8 +230,7 @@ class Orchestrator:
                 if state.operations and not state.operations[-1].ok:
                     return self._escalate(state, "Agent stopped while its last tool call was "
                                           "still failing (unrecovered error).", last_text)
-                self._log(state, "DONE")
-                return RunResult(True, last_text, state)
+                return self._finish(state, last_text)
 
             results = []
             for i, call in enumerate(calls):
@@ -229,6 +260,148 @@ class Orchestrator:
 
         return self._escalate(state, f"Step limit ({self.max_steps}) reached without completing "
                               "the goal.", last_text)
+
+    # -- duties (D22) -------------------------------------------------------------------------------------------------
+
+    async def _try_duty(self, state: ExecutionState, goal: str) -> RunResult | str:
+        """Prefer a known duty. Returns a RunResult (the duty finished the run or handed off), "" (no duty ran: plan as
+        usual), or text for the planner describing a duty that stopped part way."""
+        match, ambiguous = self.duties.best_match(goal)
+        if match is None:
+            self._log(state, "DUTY: no duty fits this request; using the planner.")
+            return ""
+        state.duty = {"name": match.duty.name, "confidence": match.confidence, "kind": match.kind, "outcome": "not_used"}
+        if ambiguous:
+            state.duty["outcome"] = "ambiguous"
+            self._log(state, f"DUTY: '{match.duty.name}' ({match.confidence:.2f}) is not clearly the best fit; using the planner.")
+            return ""
+        if match.confidence < self.duty_threshold:
+            state.duty["outcome"] = "below_threshold"
+            self._log(state, f"DUTY: closest is '{match.duty.name}' at {match.confidence:.2f}, below the "
+                      f"{self.duty_threshold} threshold; using the planner.")
+            return ""
+        return await self._run_duty(state, match)
+
+    def _read_only(self, tool: str) -> bool | None:
+        return getattr(self.registry, "is_read_only", lambda _t: None)(tool)
+
+    async def _run_duty(self, state: ExecutionState, match: DutyMatch) -> RunResult | str:
+        duty = match.duty
+        state.duty = {"name": duty.name, "confidence": match.confidence, "kind": match.kind, "outcome": "running"}
+        self._log(state, f"DUTY: using '{duty.name}' ({match.kind} match, confidence {match.confidence:.2f} "
+                  f">= {self.duty_threshold})")
+        results: dict[str, Any] = {}
+        boundary = duty.boundary_index
+        for idx, step in enumerate(duty.steps):
+            try:
+                if step.guard is not None and not holds(step.guard, match.captures, results):
+                    raise DutyContractError("guard_false", f"step {step.id}: {step.guard['check']} is not "
+                                            f"{step.guard.get('equals')!r}")
+                args = resolve(step.args, match.captures, results)
+                if step.tool not in self._tool_defs:
+                    raise DutyContractError("unknown_tool", f"{step.tool} is not registered")
+                if idx < boundary and self._read_only(step.tool) is not True:
+                    raise DutyContractError("write_before_boundary", f"{step.tool} (step {step.id}) is not read-only "
+                                            "but comes before the write boundary; nothing was run for it")
+            except DutyContractError as exc:
+                return self._duty_contract_failed(state, duty.name, exc)
+            if idx == boundary:
+                stopped = await self._cross_boundary(state, duty, step, args)
+                if stopped is not None:
+                    return stopped
+            attempts = 0
+            while True:
+                attempts += 1
+                self._log(state, f"[duty {duty.name}:{step.id}] CALL {step.tool}({json.dumps(args, default=str)})")
+                out = await self.registry.call(step.tool, args)
+                op = Operation(idx + 1, step.tool, args, out.ok, out.data if out.ok else None, out.error_code,
+                               out.error_message, out.retryable, out.recovery, out.duration_ms,
+                               f"[duty {duty.name}:{step.id}]", out.http_status)
+                state.operations.append(op)
+                state.consecutive_failures = 0 if out.ok else state.consecutive_failures + 1
+                self._track(state, op)
+                self._log(state, f"[duty {duty.name}:{step.id}] RESULT {step.tool}: "
+                          + (out.to_llm_text()[:500] if out.ok else out.to_llm_text()))
+                reason = self._handoff_reason(state, op)
+                if reason:  # the same recovery policy as the planner path: a person is needed, or retries are exhausted
+                    state.duty["outcome"] = "handed_off"
+                    return self._escalate(state, reason, "", trigger=op)
+                if out.ok:
+                    results[step.id] = out.data
+                    break
+                if out.retryable and attempts < 2:
+                    self._log(state, f"[duty {duty.name}:{step.id}] retryable failure: repeating the same call once")
+                    continue
+                # recovery=agent, not retryable: only an agent can correct arguments, and a duty cannot, so the planner
+                # continues from here (and it, not the duty, now has the one self-correction the policy allows)
+                state.duty["outcome"] = "step_failed"
+                state.duty["failure"] = {"step": step.id, "code": op.error_code, "message": op.error_message}
+                self._log(state, f"DUTY: step '{step.id}' of '{duty.name}' failed ([{op.error_code}]); the planner continues.")
+                return self._planner_preface(state, duty.name, f"step '{step.id}' failed: [{op.error_code}] {op.error_message}")
+        try:
+            met = holds(duty.success, match.captures, results)
+            if not met:
+                raise DutyContractError("success_criterion", f"'{duty.success['name']}' is not met "
+                                        f"({duty.success['check']} is not {duty.success.get('equals', 'present')!r})")
+        except DutyContractError as exc:
+            return self._duty_contract_failed(state, duty.name, exc)
+        state.duty["outcome"] = "completed"
+        return self._finish(state, f"Duty '{duty.name}' completed: {duty.success['name']}.", duty_used=duty.name)
+
+    async def _cross_boundary(self, state: ExecutionState, duty: Any, step: Any, args: dict[str, Any]) -> RunResult | None:
+        """The write boundary: consult the write gate BEFORE the first write-classified step. None = go ahead."""
+        ahead = [s.tool for s in duty.steps[duty.boundary_index:] if self._read_only(s.tool) is not True]
+        event = BoundaryEvent(duty.name, step.id, step.tool, args, ahead, [o.tool for o in state.completed])
+        verdict = self.write_gate(event)
+        if inspect.isawaitable(verdict):
+            verdict = await verdict
+        approved = bool(verdict)
+        state.write_boundary = {"duty": duty.name, "before_step": step.id, "tool": step.tool, "approved": approved,
+                                "write_tools_ahead": ahead, "completed_before": event.completed}
+        self._log(state, f"WRITE BOUNDARY of '{duty.name}' before {step.tool}: "
+                  f"{'approved' if approved else 'NOT approved'} (writes ahead: {', '.join(ahead) or 'none'})")
+        if approved:
+            return None
+        state.duty["outcome"] = "declined"
+        return self._escalate(state, f"Write boundary of duty '{duty.name}' was not approved before {step.tool}: "
+                              "the duty made no changes.", "")
+
+    def _duty_contract_failed(self, state: ExecutionState, name: str, exc: DutyContractError) -> str:
+        """A duty's contract did not hold. NEVER silent: it is recorded on the state (and so on the run result and any
+        handoff) and logged, and the planner takes over knowing what the duty already did."""
+        state.duty_contract_failed = name
+        state.duty = {**(state.duty or {}), "outcome": "contract_failed", "failure": {"kind": exc.kind, "detail": exc.detail}}
+        self._log(state, f"DUTY CONTRACT FAILED: {name}: {exc.kind}: {exc.detail}. Falling back to the planner.")
+        return self._planner_preface(state, name, f"its contract failed ({exc.kind}: {exc.detail})")
+
+    def _planner_preface(self, state: ExecutionState, name: str, why: str) -> str:
+        done = [{"tool": o.tool, "arguments": o.arguments, "result": o.result} for o in state.completed]
+        return (f"\n\n[A reviewed procedure ('{name}') was started for this request and stopped: {why}. Actions it already "
+                f"completed, which you must NOT repeat: {json.dumps(done, default=str) if done else 'none'}. Finish the "
+                "goal from here with the available tools, or say plainly what cannot be done.]")
+
+    def _finish(self, state: ExecutionState, text: str, duty_used: str | None = None) -> RunResult:
+        self._log(state, "DONE")
+        self._record_run(state, duty_used)
+        return RunResult(True, text, state, duty_used=duty_used, duty_contract_failed=state.duty_contract_failed)
+
+    def _record_run(self, state: ExecutionState, duty_used: str | None) -> None:
+        """Keep a record of a SUCCESSFUL run (opt-in via run_log_dir): what duty induction learns from (D23)."""
+        if self.run_log_dir is None:
+            return
+        self.run_log_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{datetime.now():%Y%m%d_%H%M%S}_{self.user_id}"
+        path, n = self.run_log_dir / f"{stem}.json", 1
+        while path.exists():
+            n += 1
+            path = self.run_log_dir / f"{stem}_{n}.json"
+        record = {"goal": state.goal, "success": True, "user": self.user_id, "duty_used": duty_used,
+                  "duty_contract_failed": state.duty_contract_failed,
+                  "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                  "operations": [{"tool": o.tool, "arguments": o.arguments, "ok": o.ok, "result": o.result,
+                                  "read_only": self._read_only(o.tool)} for o in state.operations]}
+        path.write_text(json.dumps(record, indent=2, default=str), encoding="utf-8")
+        self._log(state, f"Run record saved to {path}")
 
     # -- exception routing -------------------------------------------------------------------
 
@@ -291,7 +464,7 @@ class Orchestrator:
         """The handoff as written to disk: the two recovery=human flags are omitted unless they are true, so their
         PRESENCE means something (a handoff caused by a retryable/agent failure never carries them)."""
         data = asdict(handoff)
-        for key in ("human_required", "agent_recovery_skipped"):
+        for key in ("human_required", "agent_recovery_skipped", "duty", "duty_contract_failed", "write_boundary"):
             if data.get(key) is None:
                 data.pop(key, None)
         return data
@@ -345,6 +518,7 @@ class Orchestrator:
             failure_industry=None if trigger is None else self._industry(trigger.tool),
             human_required=True if state.human_required else None,
             agent_recovery_skipped=True if state.agent_recovery_skipped else None,
+            duty=state.duty, duty_contract_failed=state.duty_contract_failed, write_boundary=state.write_boundary,
         )
         self._log(state, f"HANDOFF: {reason}")
         if self.handoff_dir is not None:

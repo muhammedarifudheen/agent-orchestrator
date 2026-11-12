@@ -19,14 +19,20 @@ For each approved proposal:
   5. green -> `git add` exactly those three files + the moved proposal and commit. The commit happens only after the
      final green verify, and never on a reject.
 Rejected proposals move to rejected/ with `<name>.reason.txt`; applied ones move to applied/.
+
+Duty proposals (CLAUDE.md D23 (3)) follow the same shape under `proposals/duties/`: `apply_approved_duties` acts only on
+`proposals/duties/approved/*.duty.yaml`, runs the generated contract test on a staged copy, installs `duties/<name>.yaml` and
+`tests/duties/test_duty_<name>.py` only when it is green, verifies the installed files, and commits exactly those files.
 """
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -182,8 +188,11 @@ def _git(root: Path, *args: str, config: list[str] | None = None) -> subprocess.
     return subprocess.run(["git", *(config or []), "-C", str(root), *args], capture_output=True, text=True)
 
 
-def _commit(layout: pipeline.Layout, files: list[Path], old: Path, new: Path, message: str) -> str:
-    """Commit exactly `files` + the moved proposal. Returns "" on success or when not in a git work tree."""
+def _commit(layout: pipeline.Layout, files: list[Path], old: Path | list[Path], new: Path | list[Path],
+            message: str) -> str:
+    """Commit exactly `files` + the moved proposal file(s). Returns "" on success or when not in a git work tree."""
+    olds = old if isinstance(old, list) else [old]
+    news = new if isinstance(new, list) else [new]
     root = layout.root
     try:
         inside = _git(root, "rev-parse", "--is-inside-work-tree")
@@ -193,18 +202,19 @@ def _commit(layout: pipeline.Layout, files: list[Path], old: Path, new: Path, me
         return ""
     top = Path(_git(root, "rev-parse", "--show-toplevel").stdout.strip()).resolve()
     paths: list[Path] = []
-    for p in [*files, new]:
+    for p in [*files, *news]:
         try:
             p.resolve().relative_to(top)
         except ValueError:
             continue
         paths.append(p)
-    try:
-        old.resolve().relative_to(top)
-        if _git(root, "ls-files", "--error-unmatch", "--", str(old)).returncode == 0:
-            paths.append(old)  # tracked: stage its deletion too
-    except ValueError:
-        pass
+    for old in olds:
+        try:
+            old.resolve().relative_to(top)
+            if _git(root, "ls-files", "--error-unmatch", "--", str(old)).returncode == 0:
+                paths.append(old)  # tracked: stage its deletion too
+        except ValueError:
+            pass
     specs = [str(p) for p in paths]
     added = _git(root, "add", "-A", "--", *specs)
     if added.returncode != 0:
@@ -220,6 +230,147 @@ def _commit(layout: pipeline.Layout, files: list[Path], old: Path, new: Path, me
     return ""
 
 
+# -- duty proposals (CLAUDE.md D23 (3)) ---------------------------------------------------------------------------------
+
+DUTY_SUFFIX = ".duty.yaml"
+DUTY_SIBLINGS = (".duty.diff", ".contract_test.py", ".evidence.json")
+
+
+def waiting_duties(proposals_dir: Path) -> list[Path]:
+    """Duty proposals still waiting for a human decision (directly in proposals/duties/). Never acted on."""
+    folder = proposals_dir / "duties"
+    return sorted(folder.glob("*" + DUTY_SUFFIX)) if folder.is_dir() else []
+
+
+def _run_contract_test(layout: pipeline.Layout, test_path: Path, duties_dir: Path | None) -> tuple[bool, str]:
+    """Run one generated contract test in a pytest subprocess (cwd = the project root). `duties_dir` set: the test reads the
+    duty from there (DUTIES_DIR, staging); None: it reads the installed duties/ (the variable is removed)."""
+    env = {k: v for k, v in os.environ.items() if k != "DUTIES_DIR"}
+    if duties_dir is not None:
+        env["DUTIES_DIR"] = str(duties_dir)
+    done = subprocess.run([sys.executable, "-m", "pytest", str(test_path), "-q", "-p", "no:cacheprovider"],
+                          cwd=layout.root, env=env, capture_output=True, text=True, timeout=600)
+    return done.returncode == 0, (done.stdout + done.stderr)[-4000:]
+
+
+def apply_approved_duties(proposals_dir: Path, layout: pipeline.Layout, *, commit: bool = True) -> list[Result]:
+    """Act ONLY on `<proposals_dir>/duties/approved/*.duty.yaml`; see the module docstring and D23 (3)."""
+    approved = proposals_dir / "duties" / "approved"
+    results: list[Result] = []
+    if not approved.is_dir():
+        return results
+    for path in sorted(approved.glob("*" + DUTY_SUFFIX)):
+        try:
+            reason = _try_apply_duty(path, proposals_dir, layout, commit)
+        except Exception as exc:
+            reason = f"unexpected {type(exc).__name__}: {exc}"
+        results.append(_finish_duty(path, proposals_dir, reason))
+    return results
+
+
+def _finish_duty(path: Path, proposals_dir: Path, reason: str | None) -> Result:
+    base = path.name[: -len(DUTY_SUFFIX)]
+    if reason is None or reason.startswith("COMMIT-NOTE:"):
+        return Result(path.name, "applied", (reason or "")[len("COMMIT-NOTE:"):].strip())
+    if reason.startswith(ROLLED_BACK):
+        note = reason[len(ROLLED_BACK):].strip()
+        path.with_name(f"{base}.reason.txt").write_text(note + "\n", encoding="utf-8")
+        return Result(path.name, "rolled_back", note)
+    rejected = proposals_dir / "duties" / "rejected"
+    rejected.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        shutil.move(str(path), str(rejected / path.name))
+    (rejected / f"{base}.reason.txt").write_text(reason + "\n", encoding="utf-8")
+    return Result(path.name, "rejected", reason)
+
+
+def _cleanup_test(test_path: Path, created_dir: bool) -> None:
+    test_path.unlink(missing_ok=True)
+    cache = test_path.parent / "__pycache__"
+    for pyc in cache.glob(f"{test_path.stem}.*") if cache.is_dir() else []:
+        pyc.unlink(missing_ok=True)
+    for folder in (cache, test_path.parent) if created_dir else (cache,):
+        try:
+            folder.rmdir()
+        except OSError:
+            pass
+
+
+def _try_apply_duty(path: Path, proposals_dir: Path, layout: pipeline.Layout, commit: bool) -> str | None:
+    """None when installed (proposal moved to duties/applied/), else the rejection reason. Writes nothing before staging."""
+    from agent.duties import DutyError, parse_duty, validate_duty_data
+    from learning.induce_duty import UNREVIEWED, contract_test_source
+
+    duties_dir = layout.root / "duties"
+    try:
+        raw = path.read_bytes()
+        data = yaml.safe_load(raw.decode("utf-8-sig"))
+        validate_duty_data(data, duties_dir)
+        duty = parse_duty(data)
+    except (yaml.YAMLError, UnicodeDecodeError, DutyError, OSError) as exc:
+        return f"the duty does not load: {exc}"
+    name = duty.name
+    if path.name != name + DUTY_SUFFIX:
+        return f"refused: the file is named {path.name!r} but the duty is {name!r} (expected {name + DUTY_SUFFIX!r})"
+    reviewer = duty.reviewer.strip()
+    if not reviewer or reviewer == UNREVIEWED:
+        return f"refused: review.reviewer is {duty.reviewer!r}; a named person must review the duty and put their name there"
+    duty_path = duties_dir / f"{name}.yaml"
+    test_dir = layout.tests / "duties"
+    test_path = test_dir / f"test_duty_{name}.py"
+    if duty_path.exists() or test_path.exists():
+        return f"refused: {duty_path.name if duty_path.exists() else test_path.name} already exists (a duty is never overwritten)"
+
+    created_dir = not test_dir.exists()
+    stage = Path(tempfile.mkdtemp(prefix=f"duty-{name}-"))
+    try:
+        shutil.copyfile(duties_dir / "schema.json", stage / "schema.json")
+        (stage / f"{name}.yaml").write_bytes(raw)
+        test_dir.mkdir(parents=True, exist_ok=True)
+        test_path.write_text(contract_test_source(name), encoding="utf-8", newline="\n")
+        try:
+            green, out = _run_contract_test(layout, test_path, stage)
+        except BaseException:
+            _cleanup_test(test_path, created_dir)
+            raise
+        if not green:
+            _cleanup_test(test_path, created_dir)
+            return "the generated contract test is red on the staged duty (nothing was installed):\n" + out
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+    try:
+        duty_path.write_bytes(raw)
+        green, out = _run_contract_test(layout, test_path, None)
+    except BaseException:
+        duty_path.unlink(missing_ok=True)
+        _cleanup_test(test_path, created_dir)
+        raise
+    if not green:
+        duty_path.unlink(missing_ok=True)
+        _cleanup_test(test_path, created_dir)
+        return (ROLLED_BACK + " post-install verification failed (duties/%s.yaml and the generated test were removed; "
+                "the proposal stays in approved/):\n" % name + out)
+
+    applied = proposals_dir / "duties" / "applied"
+    applied.mkdir(parents=True, exist_ok=True)
+    olds, news = [], []
+    for suffix in (DUTY_SUFFIX, *DUTY_SIBLINGS):
+        for folder in (path.parent, proposals_dir / "duties"):
+            src = folder / f"{name}{suffix}"
+            if src.exists():
+                shutil.move(str(src), str(applied / src.name))
+                olds.append(src)
+                news.append(applied / src.name)
+                break
+    path.with_name(f"{name}.reason.txt").unlink(missing_ok=True)  # a stale rolled_back note
+    if commit:
+        note = _commit(layout, [duty_path, test_path], olds, news, f"learn: install duty {name} (reviewed by {reviewer})")
+        if note:
+            return "COMMIT-NOTE: " + note
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--proposals", type=Path, default=Path("proposals"))
@@ -231,7 +382,13 @@ def main(argv: list[str] | None = None) -> int:
     wait = waiting(args.proposals)
     print(f"{len(results)} approved proposal(s) processed; {len(wait)} waiting for approval "
           "(move into proposals/approved/ to approve, proposals/rejected/ to reject)")
-    return 1 if any(r.status == "rejected" for r in results) else 0
+    duty_results = apply_approved_duties(args.proposals, layout)
+    for r in duty_results:
+        print(f"[DUTY {r.status.upper():11s}] {r.proposal}" + (f": {r.reason.splitlines()[0]}" if r.reason else ""))
+    print(f"{len(duty_results)} approved duty proposal(s) processed; {len(waiting_duties(args.proposals))} duty proposal(s) "
+          "waiting (move into proposals/duties/approved/ to approve, proposals/duties/rejected/ to reject)")
+    failed = any(r.status == "rejected" for r in [*results, *duty_results])
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

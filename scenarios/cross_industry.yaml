@@ -35,7 +35,7 @@ intents:
     side_effect: write
   - id: confirm_customer_identity
     industry: banking
-    intent: "confirm the bank customer's identity / KYC status and list their accounts"
+    intent: "verify the bank customer's identity / KYC status and list their accounts"
     uses: [customer_id]
     consumes: []
     side_effect: read

@@ -1,4 +1,4 @@
-"""Banking MCP server: KYC check, balance lookup, fund transfer (mock data).
+"""Banking MCP server: KYC check, balance lookup, fund transfer, customer onboarding (mock data).
 
 Run standalone: python servers/banking_server.py   (stdio transport)
 
@@ -31,6 +31,8 @@ _ACCOUNTS: dict[str, dict] = {}
 # TODO(real-api): replace with the core-banking transaction log / limits engine.
 _TRANSFERS: dict[str, dict] = {}
 _DAILY_SPENT: dict[tuple[str, str], Decimal] = {}  # (from_acct, YYYY-MM-DD) -> total sent
+_COUNTERS: dict[str, int] = {}  # sequence numbers for ids minted by create_customer / open_account
+_WELCOMES: list[dict] = []
 
 
 def _seed() -> None:
@@ -39,6 +41,8 @@ def _seed() -> None:
     _ACCOUNTS.clear()
     _TRANSFERS.clear()
     _DAILY_SPENT.clear()
+    _COUNTERS.clear()
+    _WELCOMES.clear()
     _CUSTOMERS.update({
         "CUST-TEST-0001": {"kyc_status": "VERIFIED", "verified_at": "2025-01-15T10:00:00+00:00",
                            "risk_level": "LOW", "account_ids": ["ACCT-TEST-0001", "ACCT-TEST-0002"]},
@@ -218,6 +222,110 @@ def transfer_funds(from_acct: str, to_acct: str, amount: float) -> dict:
     return {"transfer_id": transfer_id, "status": "COMPLETED", "from_acct": from_acct,
             "to_acct": to_acct, "amount": _money(value), "currency": src["currency"],
             "from_balance_after": _money(src["available"]), "timestamp": now}
+
+
+def _next_id(kind: str, prefix: str) -> str:
+    _COUNTERS[kind] = _COUNTERS.get(kind, 0) + 1
+    return f"{prefix}{_COUNTERS[kind]:04d}"
+
+
+@tool(side_effect="write", idempotent=False)
+def create_customer(name: str, document_id: str) -> dict:
+    """Create a new customer record from a name and a document number. Side effect: a customer is created.
+
+    Call first when onboarding someone who is not yet a customer. Afterwards read the KYC outcome with
+    the returned customer_id before open_account. Not idempotent: each call creates another customer.
+
+    Args:
+        name: The customer's full name; must not be empty.
+        document_id: Identity document number. (Mock KYC provider: ids starting "DOC-VALID" verify,
+            "DOC-REJECT" are rejected, anything else stays PENDING.)
+
+    Returns:
+        Dict with customer_id, name, kyc_status ("VERIFIED", "PENDING" or "REJECTED").
+
+    Errors: INVALID_NAME (retryable=false), INVALID_DOCUMENT (retryable=false),
+    CORE_BANKING_UNAVAILABLE (retryable=true; the customer may not have been created).
+    """
+    _check_outage("create_customer")
+    if not name.strip():
+        raise ToolFailure("INVALID_NAME", "name must not be empty.", retryable=False, recovery="agent")
+    if not document_id.strip():
+        raise ToolFailure("INVALID_DOCUMENT", "document_id must not be empty.", retryable=False, recovery="agent")
+    # TODO(real-api): create the customer in the customer master and submit the document to the KYC provider.
+    doc = document_id.strip().upper()
+    status = "VERIFIED" if doc.startswith("DOC-VALID") else "REJECTED" if doc.startswith("DOC-REJECT") else "PENDING"
+    customer_id = _next_id("customer", "CUST-NEW-")
+    _CUSTOMERS[customer_id] = {"name": name.strip(), "kyc_status": status,
+                               "verified_at": _now() if status == "VERIFIED" else None,
+                               "risk_level": "HIGH" if status == "REJECTED" else "LOW", "account_ids": []}
+    return {"customer_id": customer_id, "name": name.strip(), "kyc_status": status}
+
+
+@tool(side_effect="write", idempotent=False)
+def open_account(customer_id: str, currency: str) -> dict:
+    """Open a new, empty account for a KYC-VERIFIED customer. Side effect: an account is created.
+
+    Call after create_customer and verify_kyc showed kyc_status VERIFIED. Not idempotent: each
+    call opens another account.
+
+    Args:
+        customer_id: Customer id from create_customer.
+        currency: ISO currency code: "INR", "USD" or "EUR".
+
+    Returns:
+        Dict with account_id, customer_id, currency, status ("ACTIVE"), available_balance (0.0).
+
+    Errors: CUSTOMER_NOT_FOUND (retryable=false), KYC_NOT_VERIFIED (retryable=false; a person must
+    resolve it), INVALID_CURRENCY (retryable=false), CORE_BANKING_UNAVAILABLE (retryable=true; the
+    account may not have been opened: check verify_kyc's account_ids before retrying).
+    """
+    _check_outage("open_account")
+    customer = _CUSTOMERS.get(customer_id.strip())
+    if customer is None:
+        raise ToolFailure("CUSTOMER_NOT_FOUND", f"No customer '{customer_id}'.", retryable=False, recovery="agent")
+    if currency.strip().upper() not in ("INR", "USD", "EUR"):
+        raise ToolFailure("INVALID_CURRENCY", f"Unsupported currency '{currency}'.", retryable=False, recovery="agent")
+    if customer["kyc_status"] != "VERIFIED":
+        raise ToolFailure("KYC_NOT_VERIFIED", f"Customer KYC status is {customer['kyc_status']}; must be VERIFIED.",
+                          retryable=False, recovery="human")
+    # TODO(real-api): open the account in the core-banking ledger.
+    account_id = _next_id("account", "ACCT-NEW-")
+    _ACCOUNTS[account_id] = {"customer_id": customer_id.strip(), "currency": currency.strip().upper(),
+                             "available": Decimal("0.00"), "ledger": Decimal("0.00"), "status": "ACTIVE"}
+    customer["account_ids"].append(account_id)
+    return {"account_id": account_id, "customer_id": customer_id.strip(), "currency": currency.strip().upper(),
+            "status": "ACTIVE", "available_balance": 0.0}
+
+
+@tool(side_effect="write", idempotent=False)
+def send_welcome(customer_id: str, account_id: str) -> dict:
+    """Send the new customer a welcome message with their account details. Side effect: a message is sent.
+
+    Call last in onboarding, after open_account succeeded. Not idempotent: every call sends another message.
+
+    Args:
+        customer_id: Customer id from create_customer.
+        account_id: Account id from open_account; it must belong to that customer.
+
+    Returns:
+        Dict with message_id, customer_id, account_id, status ("SENT").
+
+    Errors: CUSTOMER_NOT_FOUND (retryable=false), ACCOUNT_NOT_FOUND (retryable=false),
+    ACCOUNT_MISMATCH (retryable=false; the account is not this customer's).
+    """
+    customer = _CUSTOMERS.get(customer_id.strip())
+    if customer is None:
+        raise ToolFailure("CUSTOMER_NOT_FOUND", f"No customer '{customer_id}'.", retryable=False, recovery="agent")
+    account = _get_account(account_id.strip())
+    if account["customer_id"] != customer_id.strip():
+        raise ToolFailure("ACCOUNT_MISMATCH", f"Account '{account_id}' does not belong to '{customer_id}'.",
+                          retryable=False, recovery="agent")
+    # TODO(real-api): send through the messaging provider.
+    message = {"message_id": _next_id("message", "MSG-"), "customer_id": customer_id.strip(),
+               "account_id": account_id.strip(), "status": "SENT"}
+    _WELCOMES.append(message)
+    return dict(message)
 
 
 if __name__ == "__main__":

@@ -52,7 +52,8 @@ async def bal(acct: str) -> float:
 async def test_discovery():
     async with Client(mcp) as c:
         tools = (await c.list_tools()).tools
-    assert sorted(t.name for t in tools) == ["get_account_balance", "transfer_funds", "verify_kyc"]
+    assert sorted(t.name for t in tools) == [
+        "create_customer", "get_account_balance", "open_account", "send_welcome", "transfer_funds", "verify_kyc"]
     assert all(t.description and len(t.description) > 50 for t in tools)
 
 

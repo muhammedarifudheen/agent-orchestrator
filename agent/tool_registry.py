@@ -82,6 +82,7 @@ class ToolRegistry:
     _sessions: dict[str, ClientSession] = field(default_factory=dict, init=False)
     _tools: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
     connect_errors: dict[str, str] = field(default_factory=dict, init=False)
+    _read_only: dict[str, bool | None] = field(default_factory=dict, init=False)
 
     async def __aenter__(self) -> "ToolRegistry":
         await self._stack.__aenter__()
@@ -110,6 +111,17 @@ class ToolRegistry:
                 "description": tool.description or "",
                 "input_schema": tool.input_schema,
             }
+            self._record_annotations(f"{name}{SEP}{tool.name}", tool)
+
+    def _record_annotations(self, qualified_name: str, tool: Any) -> None:
+        """Keep the server's own safety classification (MCP `read_only_hint`) next to the tool."""
+        hint = getattr(getattr(tool, "annotations", None), "read_only_hint", None)
+        self._read_only[qualified_name] = hint if isinstance(hint, bool) else None
+
+    def is_read_only(self, qualified_name: str) -> bool | None:
+        """True = the tool only reads; False = it changes state or moves money; None = the server did not say
+        (callers must treat that as a write)."""
+        return self._read_only.get(qualified_name)
 
     def anthropic_tools(self) -> list[dict[str, Any]]:
         """Tool definitions in Claude API format."""

@@ -25,6 +25,7 @@ class InMemoryRegistry(ToolRegistry):
             self._tools[f"{name}__{tool.name}"] = {
                 "name": f"{name}__{tool.name}", "description": tool.description or "",
                 "input_schema": tool.input_schema}
+            self._record_annotations(f"{name}__{tool.name}", tool)
 
 
 class SpyRegistry(InMemoryRegistry):
@@ -32,6 +33,10 @@ class SpyRegistry(InMemoryRegistry):
 
     calls: list[str]
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.calls = []  # present (and empty) before the first call, so "nothing reached a server" can be asserted
+
     async def call(self, qualified_name, args):
-        self.__dict__.setdefault("calls", []).append(qualified_name)
+        self.calls.append(qualified_name)
         return await super().call(qualified_name, args)

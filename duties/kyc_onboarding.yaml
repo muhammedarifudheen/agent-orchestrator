@@ -1,0 +1,27 @@
+name: kyc_onboarding
+description: Create a customer, read the KYC outcome, open an account only if KYC is VERIFIED, then send the welcome message.
+review: {status: reviewed, reviewer: "Duty Library Maintainers (initial set)"}
+intent_patterns:
+  - "onboard customer {name} with document {document_id} in {currency}"
+parameters:
+  name: {type: string, pattern: "^[A-Za-z][A-Za-z .'-]{1,59}$"}
+  document_id: {type: string, pattern: "^DOC-[A-Z0-9-]+$", transform: upper}
+  currency: {type: string, pattern: "^[A-Za-z]{3}$", transform: upper}
+steps:
+  - id: create
+    tool: banking__create_customer
+    args: {name: "$intent.name", document_id: "$intent.document_id"}
+  - id: kyc
+    tool: banking__verify_kyc
+    args: {customer_id: "$create.customer_id"}
+  - id: open
+    tool: banking__open_account
+    args: {customer_id: "$create.customer_id", currency: "$intent.currency"}
+    guard: {check: "$kyc.kyc_status", equals: "VERIFIED"}
+  - id: welcome
+    tool: banking__send_welcome
+    args: {customer_id: "$create.customer_id", account_id: "$open.account_id"}
+    guard: {check: "$kyc.kyc_status", equals: "VERIFIED"}
+write_boundary: {before: create}
+success: {name: welcome_sent, check: "$welcome.status", equals: "SENT"}
+example: {intent: "onboard customer Priya Nair with document DOC-VALID-123 in INR", expect: success}

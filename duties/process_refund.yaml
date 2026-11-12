@@ -1,0 +1,29 @@
+name: process_refund
+description: Verify an order, check refund eligibility, issue the refund for the exact refundable amount, then notify the customer.
+review: {status: reviewed, reviewer: "Duty Library Maintainers (initial set)"}
+intent_patterns:
+  - "refund order {order_id}"
+parameters:
+  order_id: {type: string, pattern: "^ORD-[A-Z0-9]{8}$", transform: upper}
+steps:
+  - id: verify
+    tool: retail__verify_order
+    args: {order_id: "$intent.order_id"}
+  - id: eligibility
+    tool: retail__check_refund_eligibility
+    args: {order_id: "$intent.order_id"}
+  - id: refund
+    tool: retail__issue_refund
+    args: {order_id: "$intent.order_id", amount: "$eligibility.refundable_amount"}
+    guard: {check: "$eligibility.eligible", equals: true}
+  - id: notify
+    tool: retail__notify_customer
+    args: {customer_id: "$verify.customer_id", message: "Your refund has been issued."}
+write_boundary: {before: refund}
+success: {name: order_refunded, check: "$refund.status", equals: "REFUNDED"}
+example:
+  intent: "refund order $setup.order.order_id"
+  setup:
+    - {id: order, tool: retail__create_order, args: {sku: SKU-1001, qty: 1, customer_id: C-1001}}
+    - {id: paid, tool: retail__charge_payment, args: {order_id: "$setup.order.order_id", amount: "$setup.order.total_amount"}}
+  expect: success

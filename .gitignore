@@ -11,5 +11,8 @@ proposals/*.patch
 proposals/*/*.patch
 proposals/*/*.reason.txt
 
+# run records (logs; duty induction reads them, D23)
+runs/*.json
+
 # slow-run capture (tests/perf_capture.py)
 .perf/

@@ -464,6 +464,87 @@ implemented them. Change them here first, then in code.
   is skipped by default or a `tests/test_audit_*.py` test (recursion). Findings recorded rather than fixed (no features in
   this package): no cost/token accounting, no orphan-handoff detection and no `reversible`/`scope` write metadata exist (the write-safety
   layer is D8/D12/D15); the brief's counts (569 passed / 23 skips / 15 live tests) were stale: 587 / 25 / 14.
+- D22. Duties: the orchestrator prefers a known, reviewed sequence over fresh planning (Package 8). A DUTY (`duties/<name>.yaml`,
+  validated by `duties/schema.json`, loaded by `agent/duties.py`) is a named sequence of qualified tool calls with intent patterns
+  (`"refund order {order_id}"`), typed parameters, a WRITE BOUNDARY, a success criterion, an example, and `review.reviewer` (a
+  named person; a duty in `duties/` is a reviewed one). Arguments are literals or references (`$intent.<param>`, `$<step>`,
+  `$<step>.a.0.b`); an optional `guard` skips nothing silently: a false guard is a contract failure. The orchestrator knows no
+  duty: they are discovered from `duties/` at run time (a test scans `agent/` for any duty name, and the D19 industry-word scan
+  covers `agent/duties.py`).
+  (1) MATCHING. Exact first (the whole request fits a pattern: confidence 1.0), then a scored fuzzy match: the pattern's literal
+  words are aligned to the request in sequence, a misspelled word counts at its similarity (at least 0.85), a final parameter
+  takes ONE word, and every request word outside the pattern costs its share. `DUTY_CONFIDENCE_THRESHOLD = 0.9` (in
+  `agent/duties.py`; `tests/test_duty_matching.py` fails if this line and the constant disagree, as D12 does). Why 0.9: one
+  polite extra word on a normal request scores about 0.93 and runs; one dropped word of an 8-word pattern scores 0.875 and does
+  not; "could you please ... thanks" scores 0.78 and does not. A duty can write, so the threshold errs toward the planner, which can
+  ask. A parameter that does not fit its pattern (a city name where an airport code belongs) means the request cannot run the duty
+  at all. Two different duties within 0.03 of each other at the top are ambiguous: no duty. Never lower the number to make a request
+  match; change it only by a decision recorded here.
+  (2) THE WRITE BOUNDARY. `write_boundary.before` names the FIRST write-classified step, and every step before it must be
+  read-only. "Write-classified" is the server's own MCP annotation (`read_only_hint`), now kept by the registry
+  (`ToolRegistry.is_read_only`; unknown counts as a write). It is enforced three times: at review (`tests/test_duty_library.py`),
+  at run time (a pre-boundary tool that is not read-only is refused before it runs: `write_before_boundary`), and by a WRITE
+  GATE the orchestrator consults at the boundary BEFORE the first write, with the full list of writes ahead
+  (`Orchestrator(write_gate=...)`; a False stops the run with a handoff and nothing written). The DEFAULT gate allows a reviewed
+  duty to cross its own boundary, because the named reviewer already approved this exact sequence; a caller that wants a per-run
+  approval passes its own gate. The boundary is recorded in the run (`state.write_boundary`, and in any handoff).
+  (3) CONTRACT FAILURE IS NEVER SILENT. If a matched duty's contract fails while it runs (an unresolved reference, a false guard,
+  an unknown tool, a pre-boundary write, a success criterion not met), the planner takes over and is told, in the request itself,
+  which actions already completed and must not be repeated; and the failure is recorded in THREE places: the log
+  (`DUTY CONTRACT FAILED: ...`), the run result (`RunResult.duty_contract_failed`) and, if a handoff follows, its JSON
+  (`duty_contract_failed`, `duty`, `write_boundary`: present only when the duty layer was involved). A TOOL failure inside a duty is
+  not a contract failure: it follows the same recovery policy as the planner path (recovery=human or an unknown recovery: hand off at
+  once; a retryable failure: repeat once, then hand off; recovery=agent: the planner continues, because only an agent can correct
+  arguments).
+  (4) THE PLANNER IS THE ORCHESTRATOR'S OWN CLIENT LOOP. The brief's "ClaudePlanner if a key, KeywordPlanner otherwise" is realised
+  by the caller choosing the client; `IntentPlanner`/`KeywordPlanner` (D20) are test-side classes and the production orchestrator
+  does not import them. With `duties=None` the orchestrator behaves exactly as before D22.
+  (5) DEVIATIONS from the brief, recorded. (a) Seven of the eleven tools the brief's duties name did not exist (`verify_order`,
+  `check_refund_eligibility`, `issue_refund`, `notify_customer` in retail; `create_customer`, `open_account`, `send_welcome` in
+  banking); they were added as hand-written mock tools (`TODO(real-api)`, rule 6) with tests, and two server-discovery tests
+  (`test_retail.py`, `test_banking.py::test_discovery`) now list the new tools. The mock KYC provider verifies a document starting
+  `DOC-VALID`, rejects `DOC-REJECT`, and leaves anything else PENDING. (b) The brief put `kyc_onboarding`'s boundary before
+  `open_account`, but `create_customer` is itself a write and comes first, so the boundary is before `create`: a duty that writes
+  before its boundary is a safety hole. (c) `book_flight` needs a passenger name and email, so its pattern carries them
+  (`... for {passenger_name} at {passenger_email}`), not only "from X to Y on Z". (d) The brief said the orchestrator already had
+  cost accounting, partial approval and write-safety proven; it had none of them (AUDIT.md section 3a). Only the write boundary above
+  was built. (e) Adding seven tools shifted the tuned keyword stub of D19: the intent "confirm the bank customer's identity / KYC
+  status" began to pick `create_customer`; the intent was restated as "verify the bank customer's identity / KYC status ..." (the
+  stub is a keyword matcher, the meaning is unchanged) and the new tool's description no longer says "identity check".
+  Known limits: `$search.0` binds the FIRST result, so a sold-out first flight fails at `book` (the grammar has no "first with
+  seats" selector); a calendar date in an example stops being bookable once past, so the shipped `book_flight` example uses `$today+60` (an
+  example intent may contain `$today+N`, expanded by `substitute_setup`), and the scenario tests use dates relative to today;
+  a duty INDUCED from identical goals still embeds the date of those runs (D23, AUDIT.md 3a C40/C42).
+- D23. Duty induction: a duty is learned from successful runs, and installed only by a person (Package 8).
+  (1) EVIDENCE. `Orchestrator(run_log_dir=...)` writes one record per SUCCESSFUL run (`runs/<time>_<user>.json`: goal, the
+  operations with their arguments, results and each tool's read-only classification, and `duty_used`). `learning/induce_duty.py`
+  reads them. A run is evidence only if it was done by the PLANNER (`duty_used` is null: a duty's own runs are not evidence for a
+  new duty) and every one of its operations succeeded. Runs are grouped by tool sequence. `MIN_RUNS = 3` (in
+  `learning/induce_duty.py`; a test fails if this line and the constant disagree): fewer than three identical-sequence runs
+  produce nothing, like `MIN_RECURRENCE = 2` for spec corrections (D18). Change either only by a decision recorded here.
+  (2) THE PROPOSAL. `python -m learning.induce_duty` writes to `proposals/duties/`: `<name>.duty.yaml` (the proposed duty),
+  `<name>.duty.diff` (the reviewable diff: a new file `duties/<name>.yaml`), `<name>.contract_test.py` (the generated test that
+  would be installed) and `<name>.evidence.json` (which runs it came from). It NEVER writes to `duties/` or `tests/`
+  (byte-identity is tested). The pattern is the words common to the goals, in sequence, with a placeholder where they differ
+  (identical goals give a literal pattern that matches only that request). Each argument is bound to the goal's placeholder,
+  to a field of an earlier result, or to a literal that is the same in every run; an argument that is none of these means NO
+  proposal (the reason is reported), because a duty that guesses an argument is worse than none. A sequence with no write
+  produces no proposal (a duty needs a boundary); the boundary is before the first write-classified tool; the success criterion
+  is the last write's constant `status` field, else its bare `true`, else the presence of its result. Proposed parameters carry
+  no `pattern`: the reviewer tightens them. The proposal is written with `review.reviewer: "PROPOSED-UNREVIEWED"`.
+  (3) APPROVAL. A person edits the proposed duty (names themselves in `review.reviewer`, tightens parameters) and moves
+  `<name>.duty.yaml` into `proposals/duties/approved/` (or `rejected/`). `python -m learning.apply` acts only on
+  `approved/`: it rejects a duty that does not load (schema and cross-field rules), a reviewer that is empty or still
+  "PROPOSED-UNREVIEWED", a name that already exists, then STAGES it, runs the generated contract test (`tests/duty_contract.py`:
+  the duty replays its own example alone through the real orchestrator, the model is never consulted, the success criterion
+  holds, the write gate is consulted once and only after reads), and only when that is green installs `duties/<name>.yaml` and
+  `tests/duties/test_duty_<name>.py` (GENERATED header), re-runs the test on the installed files (red: both removed, the
+  proposal stays approved with the reason, status `rolled_back`) and commits. A duty whose example does not replay on fresh
+  mock worlds (it depended on state the real runs created) is therefore REJECTED until its example carries a `setup`; it is
+  never installed on faith. `duties/` is unchanged until that moment.
+  (4) WHAT IS NOT PROVEN. Induction needs no model, so it adds no opt-in skip; but it has only been run on the mock servers
+  with a scripted planner. Whether a real model's runs would induce useful duties, and whether replay on a real system is safe,
+  is untested (AUDIT.md section 3a).
 
 ## Architecture: genericity
 
