@@ -638,8 +638,46 @@ implemented them. Change them here first, then in code.
   It writes no record.
   (5) NOT ADDED, on purpose: no `ANTHROPIC_BASE_URL` or any other option in `ingest/` or `agent/` (the production endpoint is the only endpoint),
   and no budget change. KNOWN LIMITS: the throwaway project is isolated for what it writes but `pipeline._verify` still runs with the real repo as its
-  working directory and uses the real `tests/test_contract.py`; the apply loop's approval is simulated; a wrong key records `real: true` and `fail`;
+  working directory and uses the real `tests/test_contract.py`; the apply loop's approval is simulated; a wrong key records `fail` and, since D26, `real: false` (this clause originally said `real: true`);
   the harness has never run against a real key or a real upstream.
+- D26. `real` is ATTESTED, not asserted (Package 10). D25 let the harness decide `real` from its own flags, so a fake key against the
+  production endpoint recorded `real: true`. Now every Python process of a live-judgment run (the harness, the pytest subprocess, the spawned
+  MCP servers: `scripts/live_attest_site/sitecustomize.py` on PYTHONPATH) appends `{host, transport, status}` for every `httpx.Client.send` to
+  LIVE_ATTEST_FILE (`scripts/live_attest.py`), where `transport` is the class that actually carried the request. A record is `real: true` ONLY if
+  at least one request to the production host (api.anthropic.com for planner/doc, the public upstream for apply) was answered over
+  `httpx.HTTPTransport` AND the answer was a 2xx (for the Anthropic API: a wrong key is a 401 and is NOT real; for `--apply` any answer counts,
+  because its upstream is supposed to fail) AND no request to that host went over any other transport (one mock request poisons it). The
+  constant for httpx's own class name is pinned by a test, because httpx re-exports its classes as `httpx.*` and a rename would otherwise
+  silently stop anything attesting as real. THE MOCK IS INCAPABLE OF REAL: `tests/live_mock.py` (canned Anthropic replies: the planner reply
+  computed by the keyword planner from the request, the doc reply the committed stub report; `--mock-transport`, offline proof only) injects a
+  transport that is not `httpx.HTTPTransport`, so it attests as not real whatever else is true; on top of that `_record` forces `real: false`
+  whenever mock mode is on, a mock run is recorded `mock: true`, and `move_audit_row.py` refuses a mock record before it looks at anything else.
+  Tests try to cheat and fail to: a forged LIVE_ATTEST_FILE in the environment, a mock transport that returns 200, a loopback server, and records
+  whose `mock`/`real` flags were rewritten (the evidence re-check still refuses them). The record gained `mock`, `allow_live`, `attestation`,
+  `artifact_sha256`; `append_record` returns the line written and the harness prints `RECORD_HASH: <sha256 of that line>`. `--apply` against a
+  public upstream needs `--allow-live` (exit 5 LIVE_NOT_ALLOWED; the one probe GET has already been sent); `--allow-live` is rejected for the other
+  subcommands and `--mock-transport` for `--apply`. Limit: attestation is evidence, not a security boundary: whoever can edit the scripts, the
+  log and an artifact consistently can forge a pass.
+- D27. The live-run ceremony (Package 10). `scripts/live_run_ceremony.py` is the one command a maintainer runs, once, with a real key and a real
+  upstream: it REFUSES without BOTH ANTHROPIC_API_KEY (exit 20; ANTHROPIC_AUTH_TOKEN alone does not count) and `--allow-live` (21) and
+  `--upstream` (22, and never a loopback/private one); runs `--planner`, `--doc`, `--apply URL --allow-live` in order, stops at the first
+  failure (AUDIT.md untouched), and only if all three passed calls `scripts/move_audit_row.py` for C24, C25, C27 with each step's record hash; it
+  writes a transcript (`.perf/ceremony/<UTC>.json`: every command, output, audit edit; the key never appears in it). `--dry-run` prints the whole
+  plan without a key. `move_audit_row.py` is the ONLY way a row leaves AUDIT.md section 3a: it checks, in this order, MOCK (17), NOT_REAL (11),
+  NOT_PASS (12), WRONG_SUBCOMMAND (16), STALE (13: the record is at most 30 minutes old; no option extends it), EVIDENCE_MISMATCH (14: the artifact
+  exists and hashes to what the record says; planner/doc: the junit report is re-classified and must be a pass with the recorded test count and a
+  key present; apply: a public upstream, `--allow-live`, attested answers), ROW_NOT_OPEN (15), DIRTY_AUDIT (18) and NO_RECORD (10); then removes the row
+  from 3a, adds it to a new `### 2b. Proven live` table (record hash, date, command, evidence hash) and commits
+  `audit: close live judgment gap <row> (<first 12 hex of the record hash>)` with the full hash and the evidence hash in the body, one commit per
+  row. Interpretation recorded: the brief said move_audit_row must re-verify "with a fresh live run"; a second paid run would add cost and no
+  evidence, so the freshness window plus re-deriving the verdict from the stored evidence is the implementation (the run that made the record is the
+  fresh live run). OFFLINE PROOF: `python scripts/live_run_ceremony.py --offline-mock` runs the whole ceremony on the mock and a loopback upstream
+  (needs no key); it passes only if all three subcommands exit 0, all three records are `real: false`, every row move is refused (17, 17, 11), and
+  AUDIT.md is byte-identical; it prints `OFFLINE PROOF OK` and the exact commands a human would run with a real key. NOTHING MOVED in this package:
+  C24, C25 and C27 are still in section 3a, and `tests/test_live_run_ceremony_offline_proof.py` checks that each of the three is in exactly one of 3a
+  and 2b and that AUDIT section 6 lists exactly the 3a rows that remain. Arithmetic corrected: moving rows changes no skip; with ANTHROPIC_API_KEY and
+  LIVE_TESTS=1 both set the default run shows 5 skipped (the 7 key-gated tests run, and `LIVE_TESTS=1` also unlocks the 14 live-API tests), not
+  19. docs/LIVE_RUN.md is the step-by-step procedure; AUDIT section 5 is the one-paragraph version.
 
 ## Architecture: genericity
 

@@ -17,6 +17,10 @@ not, and appends one line per attempt to .perf/live_judgment.jsonl.
                                                      the SOURCE of the assertions they execute, the wire request with the key
                                                      redacted); runs nothing, no network, writes no record
   --allow-loopback                                   let a loopback/private upstream be used (tests); the record has real=false
+  --allow-live                                       REQUIRED by --apply for a public upstream: the explicit confirmation that
+                                                     real requests go to a third party (never a default)
+  --mock-transport                                   OFFLINE PROOF ONLY (planner, doc): canned Anthropic replies instead of the
+                                                     network; the record says mock=true and real=false, always
 
 What it does NOT do: it holds no assertion about a plan or a spec of its own for planner/doc. The live subcommands run the
 SAME test files and test ids as everywhere else in a pytest subprocess with LIVE_TESTS=1 (which only unlocks their existing
@@ -31,6 +35,7 @@ Exit codes
   2  ANTHROPIC_API_KEY absent (planner, doc): nothing was run, recorded as skipped
   3  upstream missing (apply): no URL, not reachable, or not a real upstream: nothing was run, recorded as skipped
   4  upstream healthy (apply): it answered with a status < 400, so there is nothing to learn from: recorded as skipped
+  5  live not allowed (apply against a public upstream without --allow-live): nothing was run, recorded as skipped
   64 usage error (argparse's own exit code 2 is never used: 2 means "key missing")
 
 THIS SCRIPT NEVER EDITS A TRACKED FILE. It writes under .perf/ (git-ignored; or beside LIVE_JUDGMENT_LOG when that is set)
@@ -42,6 +47,7 @@ from __future__ import annotations
 import argparse
 import ast
 import datetime as dt
+import hashlib
 import ipaddress
 import json
 import os
@@ -63,10 +69,12 @@ EXIT_FAIL = 1
 EXIT_KEY_MISSING = 2
 EXIT_UPSTREAM_MISSING = 3
 EXIT_UPSTREAM_HEALTHY = 4
+EXIT_LIVE_NOT_ALLOWED = 5
 EXIT_USAGE = 64
 
 KEY_MISSING_MESSAGE = "ANTHROPIC_API_KEY absent; to close this gap, set the key and re-run"
 SUBCOMMANDS = ("planner", "doc", "apply")
+ANTHROPIC_HOST = "api.anthropic.com"  # the production endpoint; `real` for planner/doc means requests to it were attested
 
 # The EXISTING live-gated tests. Entries with the same `select` run in one pytest invocation. These are selections of
 # test ids, never copies of an assertion.
@@ -109,6 +117,9 @@ class _Parser(argparse.ArgumentParser):
 class _Ctx:
     def __init__(self, env: Mapping[str, str], stdout: TextIO, stderr: TextIO) -> None:
         self.env, self.stdout, self.stderr = env, stdout, stderr
+        self.allow_live = False
+        self.mock = False  # OFFLINE PROOF: canned replies; the record can then never be real
+        self.attest_file: Path | None = None  # where this run's attestation is written (scripts/live_attest.py)
 
     def out(self, text: str = "") -> None:
         try:
@@ -135,7 +146,7 @@ def _redact(text: str, env: Mapping[str, str]) -> str:
 
 def _ensure_paths() -> None:
     """Make the production modules importable (scripts/ has no package; done lazily so importing this file has no effect)."""
-    for p in (ROOT, ROOT / "servers", ROOT / "tests", ROOT / "tests" / "scenarios"):
+    for p in (ROOT, ROOT / "servers", ROOT / "tests", ROOT / "tests" / "scenarios", ROOT / "scripts"):
         if str(p) not in sys.path:
             sys.path.insert(0, str(p))
 
@@ -155,12 +166,25 @@ def log_path(env: Mapping[str, str] | None = None) -> Path:
     return Path(given) if given else ROOT / ".perf" / "live_judgment.jsonl"
 
 
-def append_record(path: Path | str, record: dict[str, Any]) -> None:
-    """Append-only: one JSON object per line; the directory is created; an existing line is never rewritten."""
+def append_record(path: Path | str, record: dict[str, Any]) -> str:
+    """Append-only: one JSON object per line; the directory is created; an existing line is never rewritten. Returns the
+    line written (without the newline): its SHA-256 is the record hash that scripts/move_audit_row.py is given."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(record, sort_keys=True, ensure_ascii=False)
     with path.open("a", encoding="utf-8", newline="\n") as fh:
-        fh.write(json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n")
+        fh.write(line + "\n")
+    return line
+
+
+def record_hash(line: str) -> str:
+    return hashlib.sha256(line.encode("utf-8")).hexdigest()
+
+
+def _sha256_file(path: str | None) -> str | None:
+    if not path or not Path(path).is_file():
+        return None
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 # -- verdicts ----------------------------------------------------------------------------------------------------------
@@ -332,8 +356,9 @@ def _shown(args: list[str]) -> str:
     return " ".join(f'"{a}"' if " " in a else a for a in args)
 
 
-def _pytest_cmd(files: list[str], select: str, xml: Path | None) -> list[str]:
-    cmd = [sys.executable, "-m", "pytest", "-q", "-rs", "-p", "no:cacheprovider", *files, "-k", select]
+def _pytest_cmd(files: list[str], select: str, xml: Path | None, mock: bool = False) -> list[str]:
+    cmd = [sys.executable, "-m", "pytest", "-q", "-rs", "-p", "no:cacheprovider", *(["-p", "live_mock"] if mock else []),
+           *files, "-k", select]
     if xml is not None:
         cmd.append(f"--junitxml={xml}")
     return cmd
@@ -359,10 +384,18 @@ def _run_group(ctx: _Ctx, files: list[str], select: str, xml: Path) -> tuple[str
     if problem:
         return "fail", problem, ids
     xml.parent.mkdir(parents=True, exist_ok=True)
-    cmd = _pytest_cmd(files, select, xml)
+    cmd = _pytest_cmd(files, select, xml, mock=ctx.mock)
     ctx.out(f"  running: LIVE_TESTS=1 python {_shown(cmd[1:])}")
+    extra = {"LIVE_TESTS": "1"}
+    if ctx.attest_file is not None:  # every Python child of this run attests what it sends (scripts/live_attest.py)
+        _ensure_paths()
+        import live_attest
+
+        extra.update(live_attest.child_environment(ctx.attest_file, ROOT, ctx.env.get("PYTHONPATH") or ""))
+    if ctx.mock:
+        extra["LIVE_JUDGMENT_MOCK"] = "1"
     try:
-        done = subprocess.run(cmd, cwd=ROOT, env=_child_env(ctx.env, LIVE_TESTS="1"), capture_output=True, text=True,
+        done = subprocess.run(cmd, cwd=ROOT, env=_child_env(ctx.env, **extra), capture_output=True, text=True,
                               timeout=STEP_TIMEOUT_S)
         text = (done.stdout or "") + (done.stderr or "")
     except subprocess.TimeoutExpired as exc:
@@ -427,6 +460,25 @@ def make_project(prefix: str, *, git: bool = False, drop: tuple[str, ...] = ()) 
         _git(proj, "add", "-A")
         _git(proj, "commit", "-q", "-m", "baseline")
     return proj
+
+
+class _patched_environ:
+    """Set environment variables for the duration of a block (the generated MCP servers inherit os.environ), then restore."""
+
+    def __init__(self, values: Mapping[str, str]) -> None:
+        self.values, self.saved = dict(values), {}
+
+    def __enter__(self) -> None:
+        for k, v in self.values.items():
+            self.saved[k] = os.environ.get(k)
+            os.environ[k] = v
+
+    def __exit__(self, *exc: Any) -> None:
+        for k, old in self.saved.items():
+            if old is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = old
 
 
 def _with_timeout(fn: Callable[[], Any], seconds: int = STEP_TIMEOUT_S) -> Any:
@@ -506,12 +558,35 @@ def assertion_sources(node_ids: list[str]) -> list[tuple[str, str]]:
 # -- recording ---------------------------------------------------------------------------------------------------------
 
 def _record(ctx: _Ctx, sub: str, result: str, reason: str, code: int, *, real: bool, artifact: str | None = None,
-            tests: list[str] | None = None, upstream: str | None = None) -> int:
-    append_record(log_path(ctx.env), {
+            tests: list[str] | None = None, upstream: str | None = None, attestation: dict[str, Any] | None = None) -> int:
+    """Append the run's record and print its hash. `real` is forced false in mock mode: whatever the caller computed, a run
+    that used the offline mock can never be a real result (D26)."""
+    line = append_record(log_path(ctx.env), {
         "date": _now().isoformat(), "subcommand": sub, "key_present": bool(ctx.key), "result": result,
-        "reason": _redact(reason, ctx.env), "exit_code": code, "real": real, "artifact_path": artifact,
-        "tests": tests or [], "upstream": upstream})
+        "reason": _redact(reason, ctx.env), "exit_code": code, "real": bool(real) and not ctx.mock, "mock": ctx.mock,
+        "allow_live": ctx.allow_live, "artifact_path": artifact, "artifact_sha256": _sha256_file(artifact),
+        "attestation": attestation, "tests": tests or [], "upstream": upstream})
+    ctx.out(f"RECORD_HASH: {record_hash(line)}")
     return code
+
+
+def _attest_start(ctx: _Ctx, sub: str, stamp: str) -> None:
+    ctx.attest_file = _run_dir(ctx) / f"{stamp}_{sub}.attest.jsonl"
+    ctx.attest_file.parent.mkdir(parents=True, exist_ok=True)
+    ctx.attest_file.write_text("", encoding="utf-8")
+
+
+def _attestation(ctx: _Ctx, host: str) -> dict[str, Any]:
+    _ensure_paths()
+    import live_attest
+
+    return live_attest.summarize(ctx.attest_file, host)
+
+
+def _is_real(ctx: _Ctx, att: dict[str, Any], verdict: str = "pass") -> bool:
+    """`real` is what the attestation shows, never what a flag says: an answered request over httpx's real transport to the
+    production host, none over any other transport, and not the offline mock."""
+    return bool(att.get("real")) and not ctx.mock and verdict != "skipped"
 
 
 def _run_dir(ctx: _Ctx) -> Path:
@@ -535,8 +610,12 @@ def _key_missing(ctx: _Ctx, sub: str) -> int:
 
 
 def _print_verdict(ctx: _Ctx, verdict: str, label: str, reason: str) -> None:
-    if verdict == "pass":
+    if verdict == "pass" and ctx.mock:
+        ctx.out(f"PASS (OFFLINE MOCK, real=false: not a live result and it can never close a gap): {label}")
+    elif verdict == "pass":
         ctx.out(f"PASS (live model): {label}")
+    elif verdict == "fail" and ctx.mock:
+        ctx.out(f"FAIL (OFFLINE MOCK): {reason}")
     elif verdict == "fail":
         ctx.out(f"FAIL (live model): {reason}")
     else:
@@ -559,11 +638,17 @@ def _cmd_planner(ctx: _Ctx) -> int:
     if not ctx.key:
         return _key_missing(ctx, "planner")
     stamp = _now().strftime("%Y%m%dT%H%M%SZ")
-    ctx.out("Running the EXISTING planner contract tests against the real model (production endpoint).")
+    _attest_start(ctx, "planner", stamp)
+    ctx.out("Running the EXISTING planner contract tests against " + (
+        "the OFFLINE MOCK (canned replies; real=false by construction)." if ctx.mock else "the real model (production endpoint)."))
     verdict, reason, ids, artifacts = _run_contract_tests(ctx, "planner", stamp)
     _print_verdict(ctx, verdict, f"{len(ids)} planner-contract tests passed", reason)
+    att = _attestation(ctx, ANTHROPIC_HOST)
+    real = _is_real(ctx, att, verdict)
+    ctx.out(f"  attestation: {att['real_requests']} answered request(s) to {ANTHROPIC_HOST} over the real transport, "
+            f"{att['non_real_requests']} over another transport; real={real}")
     code = EXIT_PASS if verdict == "pass" else EXIT_FAIL
-    return _record(ctx, "planner", verdict, reason, code, real=verdict != "skipped", artifact=artifacts[0], tests=ids)
+    return _record(ctx, "planner", verdict, reason, code, real=real, artifact=artifacts[0], tests=ids, attestation=att)
 
 
 def _pipeline_on_dogceo(ctx: _Ctx) -> tuple[str, str, Path | None]:
@@ -576,11 +661,20 @@ def _pipeline_on_dogceo(ctx: _Ctx) -> tuple[str, str, Path | None]:
         shutil.copyfile(ROOT / "tests" / "ingest" / "fixtures" / "dogceo.doc.md", source)
 
         def work() -> Any:
+            from contextlib import ExitStack
+
+            import live_attest
+            import live_mock
             import pipeline
             from ingest.anthropic_http import AnthropicHTTP
             from ingest.doc import HttpDocExtractionClient
-            client = HttpDocExtractionClient(AnthropicHTTP(ctx.key))
-            return pipeline.process(source, pipeline.Layout(root=proj), doc_client=client)
+            with ExitStack() as stack:
+                if ctx.attest_file is not None:  # what this in-process step sends is attested like the tests' requests
+                    stack.enter_context(live_attest.attesting(ctx.attest_file))
+                if ctx.mock:
+                    stack.enter_context(live_mock.mocked())
+                client = HttpDocExtractionClient(AnthropicHTTP(ctx.key))
+                return pipeline.process(source, pipeline.Layout(root=proj), doc_client=client)
 
         try:
             outcome = _with_timeout(work)
@@ -608,12 +702,16 @@ def _cmd_doc(ctx: _Ctx) -> int:
     if not ctx.key:
         return _key_missing(ctx, "doc")
     stamp = _now().strftime("%Y%m%dT%H%M%SZ")
-    ctx.out("Step 1: the EXISTING doc contract test, http parametrization, against the real model (production endpoint).")
+    _attest_start(ctx, "doc", stamp)
+    ctx.out("Step 1: the EXISTING doc contract test, http parametrization, against " + (
+        "the OFFLINE MOCK (canned replies; real=false by construction)." if ctx.mock else "the real model (production endpoint)."))
     verdict, reason, ids, artifacts = _run_contract_tests(ctx, "doc", stamp)
     if verdict != "pass":
         _print_verdict(ctx, verdict, "", reason)
+        att1 = _attestation(ctx, ANTHROPIC_HOST)
         return _record(ctx, "doc", verdict, "step 1 (doc contract): " + reason,
-                       EXIT_PASS if verdict == "pass" else EXIT_FAIL, real=verdict != "skipped", artifact=artifacts[0], tests=ids)
+                       EXIT_PASS if verdict == "pass" else EXIT_FAIL, real=_is_real(ctx, att1, verdict), artifact=artifacts[0],
+                       tests=ids, attestation=att1)
     ctx.out(f"  step 1 ok: {reason}")
     ctx.out("Step 2: the real pipeline on tests/ingest/fixtures/dogceo.doc.md with HttpDocExtractionClient, in a throwaway "
             "copy of the project.")
@@ -628,8 +726,12 @@ def _cmd_doc(ctx: _Ctx) -> int:
         artifact = str(proj) if proj else None
         ctx.out(f"  the throwaway project was kept for inspection: {artifact}")
         code = EXIT_FAIL
-    return _record(ctx, "doc", verdict2, f"step 1: {reason}; step 2: {reason2}", code, real=True,
-                   artifact=artifact or artifacts[0], tests=ids)
+    att = _attestation(ctx, ANTHROPIC_HOST)
+    real = _is_real(ctx, att, verdict2)
+    ctx.out(f"  attestation: {att['real_requests']} answered request(s) to {ANTHROPIC_HOST} over the real transport, "
+            f"{att['non_real_requests']} over another transport; real={real}")
+    return _record(ctx, "doc", verdict2, f"step 1: {reason}; step 2: {reason2}", code, real=real,
+                   artifact=artifact or artifacts[0], tests=ids, attestation=att)
 
 
 # -- apply -------------------------------------------------------------------------------------------------------------
@@ -907,6 +1009,16 @@ def _cmd_apply(ctx: _Ctx, url: str | None, allow_loopback: bool) -> int:
     if status is None:
         return _upstream_missing(ctx, url, f"{url} cannot be reached within {PROBE_TIMEOUT_S} s ({problem})")
     real = public
+    if public and not ctx.allow_live:
+        host = parts.hostname
+        reason = (f"{url} is a public upstream: this run would send real requests to {host} (the probe above was one GET); "
+                  "--allow-live is the explicit confirmation, and it is never a default")
+        ctx.out(f"LIVE_NOT_ALLOWED: {reason}")
+        ctx.out("  needs   : --allow-live")
+        ctx.out(f"  re-run  : python scripts/live_judgment.py --apply {url} --allow-live")
+        ctx.out(f"  closes  : {CLOSES['apply']}")
+        ctx.out("SKIPPED: nothing was run, and a skip is not a pass.")
+        return _record(ctx, "apply", "skipped", f"LIVE_NOT_ALLOWED: {reason}", EXIT_LIVE_NOT_ALLOWED, real=False, upstream=url)
     if status < 400:
         ctx.out(f"UPSTREAM_HEALTHY: {url} answered {status}; there is nothing to learn from a healthy endpoint. Pick one that "
                 "fails with an undeclared status (for example https://httpbin.org/status/418).")
@@ -922,20 +1034,39 @@ def _cmd_apply(ctx: _Ctx, url: str | None, allow_loopback: bool) -> int:
             "throwaway git copy of the project.")
     _run_dir(ctx).mkdir(parents=True, exist_ok=True)
     proj = make_project("live_apply_", git=True)
+    stamp = _now().strftime("%Y%m%dT%H%M%SZ")
+    _attest_start(ctx, "apply", stamp)
+    _ensure_paths()
+    import live_attest
+
+    def attested() -> tuple[dict[str, Any], bool]:
+        att = live_attest.summarize(ctx.attest_file, parts.hostname, require_success=False)
+        return att, bool(real and ctx.allow_live and att["real"])
+
     try:
-        summary = _apply_loop(ctx, url, status, proj)
+        # the generated servers run as child processes: they inherit the attestation through the environment
+        with _patched_environ(live_attest.child_environment(ctx.attest_file, ROOT, os.environ.get("PYTHONPATH", ""))):
+            summary = _apply_loop(ctx, url, status, proj)
     except _StepFailed as exc:
+        att, is_real = attested()
         ctx.out(f"FAIL (apply): {exc}")
         ctx.out(f"  the throwaway project was kept for inspection: {proj}")
-        return _record(ctx, "apply", "fail", str(exc), EXIT_FAIL, real=real, artifact=str(proj), upstream=url)
+        return _record(ctx, "apply", "fail", str(exc), EXIT_FAIL, real=is_real, artifact=str(proj), upstream=url, attestation=att)
     except Exception as exc:  # noqa: BLE001
+        att, is_real = attested()
         reason = f"{type(exc).__name__}: {_redact(str(exc), ctx.env)}"
         ctx.out(f"FAIL (apply): {reason}")
         ctx.out(f"  the throwaway project was kept for inspection: {proj}")
-        return _record(ctx, "apply", "fail", reason, EXIT_FAIL, real=real, artifact=str(proj), upstream=url)
+        return _record(ctx, "apply", "fail", reason, EXIT_FAIL, real=is_real, artifact=str(proj), upstream=url, attestation=att)
     _rmtree(proj)
-    ctx.out(f"PASS ({'real upstream' if real else 'loopback upstream, real=false: not a real-upstream result'}): {summary}")
-    return _record(ctx, "apply", "pass", summary, EXIT_PASS, real=real, upstream=url)
+    att, is_real = attested()
+    transcript = _run_dir(ctx) / f"{stamp}_apply.json"
+    transcript.write_text(json.dumps({"upstream": url, "upstream_status": status, "public": real, "allow_live": ctx.allow_live,
+                                      "summary": summary, "attestation": att}, indent=2, sort_keys=True), encoding="utf-8")
+    ctx.out(f"  attestation: {att['real_requests']} answered request(s) to {parts.hostname} over the real transport, "
+            f"{att['non_real_requests']} over another transport; real={is_real}")
+    ctx.out(f"PASS ({'real upstream' if is_real else 'loopback upstream, real=false: not a real-upstream result'}): {summary}")
+    return _record(ctx, "apply", "pass", summary, EXIT_PASS, real=is_real, artifact=str(transcript), upstream=url, attestation=att)
 
 
 # -- dry run -----------------------------------------------------------------------------------------------------------
@@ -957,6 +1088,7 @@ def _dry_run(ctx: _Ctx, sub: str, url: str | None, allow_loopback: bool) -> int:
             ctx.out("  upstream URL: ABSENT (a real run would stop with UPSTREAM_MISSING)")
         ctx.out(f"  a real run would probe the URL once (timeout {PROBE_TIMEOUT_S} s); it must answer with a status >= 400 that is "
                 "not 429 or 5xx")
+        ctx.out("  a public upstream additionally needs --allow-live (exit 5 LIVE_NOT_ALLOWED without it)")
     if sub in ("planner", "doc"):
         all_ids: list[str] = []
         ctx.out("commands a real run executes (cwd = the repo, child env LIVE_TESTS=1):")
@@ -990,6 +1122,9 @@ def _dry_run(ctx: _Ctx, sub: str, url: str | None, allow_loopback: bool) -> int:
                 "(cwd = the throwaway project, CONTRACT_SPEC_DIRS = its specs/)")
         ctx.out("a real run also records: the URL, the spec it wrote and the commit the loop made are in the throwaway project, "
                 "which is deleted on success and kept (path printed and recorded) on failure")
+    if sub in ("planner", "doc"):
+        ctx.out("a real run also attests every HTTP request it sends (scripts/live_attest.py): `real` is true only if a request to "
+                f"{ANTHROPIC_HOST} was answered over httpx's real transport and none went over another one (never in --mock-transport mode).")
     ctx.out("a dry run writes no record and makes no network request.")
     return EXIT_PASS
 
@@ -1004,6 +1139,10 @@ def _parser() -> _Parser:
                     help="the learning loop against URL (an endpoint failing with an undeclared HTTP status)")
     ap.add_argument("--dry-run", action="store_true", help="print the plan; run nothing, record nothing")
     ap.add_argument("--allow-loopback", action="store_true", help="allow a loopback/private upstream (tests; real=false)")
+    ap.add_argument("--allow-live", action="store_true",
+                    help="--apply: confirm that real requests may be sent to a public upstream (required; never a default)")
+    ap.add_argument("--mock-transport", action="store_true",
+                    help="OFFLINE PROOF ONLY (--planner/--doc): canned Anthropic replies; the record is mock=true, real=false")
     return ap
 
 
@@ -1015,12 +1154,17 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None, st
         chosen = [name for name, on in (("planner", args.planner), ("doc", args.doc), ("apply", args.apply is not None)) if on]
         if len(chosen) != 1:
             raise _UsageError("give exactly one of --planner, --doc, --apply [URL]" + (f" (got {len(chosen)})" if chosen else ""))
+        if args.mock_transport and chosen[0] == "apply":
+            raise _UsageError("--mock-transport applies to --planner and --doc only")
+        if args.allow_live and chosen[0] != "apply":
+            raise _UsageError("--allow-live applies to --apply only")
     except _UsageError as exc:
         ctx.stderr.write(f"usage error: {exc}\n")
         return EXIT_USAGE
     except SystemExit as exc:  # --help exits 0; anything else is a usage error, never argparse's 2
         return EXIT_PASS if exc.code in (0, None) else EXIT_USAGE
     sub = chosen[0]
+    ctx.allow_live, ctx.mock = bool(args.allow_live), bool(args.mock_transport)
     url = (args.apply or None) if sub == "apply" else None
     if args.dry_run:
         return _dry_run(ctx, sub, url, args.allow_loopback)
