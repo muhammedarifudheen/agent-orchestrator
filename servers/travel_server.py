@@ -88,7 +88,7 @@ def search_flights(origin: str, destination: str, date: str) -> list[dict]:
     ]
 
 
-@tool(side_effect="write", idempotent=False)
+@tool(side_effect="write", idempotent=False, reversible=False, scope="single")
 def book_flight(flight_id: str, passenger_name: str, passenger_email: str) -> dict:
     """Book one seat on a flight returned by search_flights. Creates a real reservation.
 
@@ -146,7 +146,7 @@ def book_flight(flight_id: str, passenger_name: str, passenger_email: str) -> di
     return _BOOKINGS[ref]
 
 
-@tool(side_effect="write", idempotent=False)
+@tool(side_effect="write", idempotent=False, reversible=False, scope="external")
 def send_confirmation(email: str, booking_ref: str, details: str) -> bool:
     """Email a booking confirmation to the passenger. Not idempotent: each call sends one email.
 

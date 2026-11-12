@@ -66,7 +66,7 @@ async def test_orchestrator_drives_every_tool_of_this_server_through_the_same_co
         tools = [t["name"] for t in reg.anthropic_tools() if t["name"].partition(SEP)[0] == server]
         assert tools, f"registry discovered no tools for {server}"
         for tool in tools:
-            result = await Orchestrator(reg, client=PlanLLM(tool), handoff_dir=tmp_path / tool,
+            result = await Orchestrator(reg, allow_writes=True, client=PlanLLM(tool), handoff_dir=tmp_path / tool,
                                         user_id="tester").run("a stub goal")
             calls = [o for o in result.state.operations if o.tool == tool]
             assert len(calls) >= 1, f"{tool}: the orchestrator never reached it"
@@ -107,7 +107,7 @@ mcp = MCPServer("aquarium")
 tool = make_tool(mcp)
 
 
-@tool(side_effect="write", idempotent=False)
+@tool(side_effect="write", idempotent=False, reversible=False, scope="single")
 def feed_fish(tank_id: str) -> dict:
     """Feed the fish in a tank. Call when a tank is hungry. Errors: TANK_SEALED.
 
@@ -138,9 +138,9 @@ async def test_a_brand_new_industry_works_with_zero_orchestrator_changes(tmp_pat
     (servers / "aquarium_server.py").write_text(UNSEEN_SERVER, encoding="utf-8")
     monkeypatch.syspath_prepend(str(servers))
     async with InMemoryRegistry(servers, pattern="aquarium_server.py") as reg:
-        ok = await Orchestrator(reg, client=FeedLLM("T-1"), handoff_dir=tmp_path / "ok", user_id="tester").run("feed")
+        ok = await Orchestrator(reg, allow_writes=True, client=FeedLLM("T-1"), handoff_dir=tmp_path / "ok", user_id="tester").run("feed")
         assert ok.success and ok.handoff is None
-        bad = await Orchestrator(reg, client=FeedLLM("T-SEALED"), handoff_dir=tmp_path / "bad", user_id="tester").run("feed")
+        bad = await Orchestrator(reg, allow_writes=True, client=FeedLLM("T-SEALED"), handoff_dir=tmp_path / "bad", user_id="tester").run("feed")
     assert not bad.success and bad.handoff.failure_industry == "aquarium"
     data = json.loads(next((tmp_path / "bad").glob("*.json")).read_text(encoding="utf-8"))
     assert data["industries_touched"] == ["aquarium"] and data["error_snapshot"]["error_code"] == "TANK_SEALED"

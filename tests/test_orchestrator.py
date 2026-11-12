@@ -57,7 +57,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
         async with ToolRegistry(SERVERS, pattern=TRAVEL) as reg:
             self.assertIn("travel__search_flights", [t["name"] for t in reg.anthropic_tools()])
             with tempfile.TemporaryDirectory() as d:
-                orch = Orchestrator(reg, client=StubClient(turns), handoff_dir=Path(d), **kw)
+                orch = Orchestrator(reg, allow_writes=True, client=StubClient(turns), handoff_dir=Path(d), **kw)
                 result = await orch.run("book a flight")
                 return result, list(Path(d).glob("*.json"))
 
@@ -135,7 +135,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
         Boom.messages = Boom()
         async with ToolRegistry(SERVERS, pattern=TRAVEL) as reg:
-            result = await Orchestrator(reg, client=Boom()).run("x")
+            result = await Orchestrator(reg, allow_writes=True, client=Boom()).run("x")
         self.assertFalse(result.success)
         self.assertIn("ConnectionError", result.handoff.reason)
 

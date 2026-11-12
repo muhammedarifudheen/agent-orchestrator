@@ -15,8 +15,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from agent.duties import (DUTY_CONFIDENCE_THRESHOLD, BoundaryEvent, DutyContractError, DutyLibrary, DutyMatch,
-                          allow_reviewed_duty, holds, resolve)
-from agent.tool_registry import SEP, ToolRegistry
+                          allow_reviewed_duty, boundary_error, holds, resolve)
+from agent import approvals
+from agent.tool_registry import SEP, ToolOutcome, ToolRegistry
+from agent.write_policy import APPROVAL_REQUIRED, WritePolicy, WriteProposal, classify
 
 DEFAULT_MODEL = os.environ.get("AGENT_MODEL", "claude-sonnet-5-5")
 
@@ -77,6 +79,10 @@ class ExecutionState:
     duty: dict[str, Any] | None = None
     duty_contract_failed: str | None = None
     write_boundary: dict[str, Any] | None = None
+    # Write policy (D24): every write the policy looked at, the ones refused for want of an approval, and the record made.
+    write_decisions: list[dict[str, Any]] = field(default_factory=list)
+    pending_writes: list[dict[str, Any]] = field(default_factory=list)
+    pending_approval: dict[str, Any] | None = None
 
     def note(self, line: str) -> None:
         self.log.append(line)
@@ -117,6 +123,8 @@ class Handoff:
     duty: dict[str, Any] | None = None
     duty_contract_failed: str | None = None
     write_boundary: dict[str, Any] | None = None
+    write_decisions: list[dict[str, Any]] = field(default_factory=list)  # every write the policy looked at (empty: none)
+    pending_approval: dict[str, Any] | None = None  # present only when writes await approval (D24)
 
     def to_text(self) -> str:
         lines = ["=" * 70, "HUMAN HANDOFF REQUIRED", "=" * 70,
@@ -135,6 +143,13 @@ class Handoff:
                 lines.append(f"  {o['tool']} -> {json.dumps(o['result'], default=str)}")
         else:
             lines.append("  (nothing completed)")
+        if self.pending_approval:
+            lines += ["", "Writes awaiting approval (nothing was run for them):"]
+            lines += [f"  #{w['id']} {w['tool']} {json.dumps(w['arguments'], default=str)}  "
+                      f"[reversible={w['cost_summary'].get('reversible')}, scope={w['cost_summary'].get('scope')}]"
+                      for w in self.pending_approval["writes"]]
+            if self.pending_approval.get("artifact"):
+                lines.append(f"  record: {self.pending_approval['artifact']}")
         lines += ["", f"Industries touched: {', '.join(self.industries_touched) or '(none)'}"
                   f" | failure in: {self.failure_industry or '(no tool failure)'}",
                   f"Agent's last message: {self.agent_last_message or '(none)'}", "=" * 70]
@@ -149,6 +164,7 @@ class RunResult:
     handoff: Handoff | None = None
     duty_used: str | None = None  # the duty that completed this run (None: the planner did the work)
     duty_contract_failed: str | None = None  # a duty whose contract failed while it ran (the planner took over)
+    pending_approval: dict[str, Any] | None = None  # the record of writes that await a person (None: none do)
 
 
 class Orchestrator:
@@ -168,6 +184,9 @@ class Orchestrator:
         duty_threshold: float = DUTY_CONFIDENCE_THRESHOLD,
         write_gate: Callable[[BoundaryEvent], Any] = allow_reviewed_duty,
         run_log_dir: Path | None = None,
+        allow_writes: bool = False,
+        approver: Callable[..., Any] | None = None,
+        approvals_dir: Path | None = None,
     ) -> None:
         if client is None:
             from anthropic import AsyncAnthropic  # reads ANTHROPIC_API_KEY
@@ -181,6 +200,11 @@ class Orchestrator:
         # Duties are discovered from duties/ ("auto"), passed in, or switched off (None). Nothing here names one (D22).
         self.duties = DutyLibrary() if duties == "auto" else duties
         self.duty_threshold, self.write_gate, self.run_log_dir = duty_threshold, write_gate, run_log_dir
+        # D24: no write runs unless allow_writes, an approver says yes to that call, or the duty is declared unattended.
+        self.policy = WritePolicy(allow_writes, approver)
+        self.duty_errors: dict[str, str] = {}
+        self.approvals_dir = approvals_dir if approvals_dir is not None else (
+            handoff_dir / "approvals" if handoff_dir is not None else None)
 
     async def run(self, goal: str) -> RunResult:
         state = ExecutionState(goal=goal)
@@ -194,6 +218,7 @@ class Orchestrator:
 
         preface = ""
         if self.duties is not None and len(self.duties):
+            self.duty_errors = self._duty_load_errors(state)
             outcome = await self._try_duty(state, goal)
             if isinstance(outcome, RunResult):
                 return outcome
@@ -236,7 +261,7 @@ class Orchestrator:
             for i, call in enumerate(calls):
                 args = dict(call.input or {})
                 self._log(state, f"[step {state.steps}] CALL {call.name}({json.dumps(args, default=str)})")
-                out = await self.registry.call(call.name, args)
+                out = await self._call_tool(state, call.name, args)
                 op = Operation(state.steps, call.name, args, out.ok, out.data if out.ok else None,
                                out.error_code, out.error_message, out.retryable, out.recovery, out.duration_ms, thought,
                                out.http_status)
@@ -245,6 +270,10 @@ class Orchestrator:
                 self._track(state, op)
                 self._log(state, f"[step {state.steps}] RESULT {call.name}: "
                           + (out.to_llm_text()[:500] if out.ok else out.to_llm_text()))
+                if out.error_code == APPROVAL_REQUIRED:  # keep going through THIS turn's calls: the record lists every write
+                    results.append({"type": "tool_result", "tool_use_id": call.id,
+                                    "content": out.to_llm_text(), "is_error": True})
+                    continue
                 reason = self._handoff_reason(state, op)
                 if reason:  # stop NOW: skip the rest of this turn's calls, never call the LLM again
                     state.skipped = [{"tool": c.name, "arguments": dict(c.input or {})} for c in calls[i + 1:]]
@@ -256,6 +285,8 @@ class Orchestrator:
                     self._log(state, f"[step {state.steps}] RE-PROMPT (one self-correction allowed): {hint.strip()[:300]}")
                 results.append({"type": "tool_result", "tool_use_id": call.id,
                                 "content": out.to_llm_text() + hint, "is_error": not out.ok})
+            if state.pending_writes:
+                return self._finish_pending(state, last_text)
             messages.append({"role": "user", "content": results})
 
         return self._escalate(state, f"Step limit ({self.max_steps}) reached without completing "
@@ -266,7 +297,7 @@ class Orchestrator:
     async def _try_duty(self, state: ExecutionState, goal: str) -> RunResult | str:
         """Prefer a known duty. Returns a RunResult (the duty finished the run or handed off), "" (no duty ran: plan as
         usual), or text for the planner describing a duty that stopped part way."""
-        match, ambiguous = self.duties.best_match(goal)
+        match, ambiguous = self.duties.best_match(goal, exclude=set(self.duty_errors))
         if match is None:
             self._log(state, "DUTY: no duty fits this request; using the planner.")
             return ""
@@ -281,6 +312,19 @@ class Orchestrator:
                       f"{self.duty_threshold} threshold; using the planner.")
             return ""
         return await self._run_duty(state, match)
+
+    def _duty_load_errors(self, state: ExecutionState) -> dict[str, str]:
+        """Check every duty's write boundary against THIS registry's own classification before any duty can run: the
+        boundary must be the first write-classified step. A duty that fails is unusable for this run, said loudly."""
+        def kind(tool: str) -> str:
+            if tool not in self._tool_defs:
+                return "absent"
+            return "read" if classify(self.registry, tool).is_read else "write"
+
+        errors = {d.name: problem for d in self.duties.duties.values() if (problem := boundary_error(d, kind))}
+        for name, problem in errors.items():
+            self._log(state, f"DUTY UNUSABLE: {problem}")
+        return errors
 
     def _read_only(self, tool: str) -> bool | None:
         return getattr(self.registry, "is_read_only", lambda _t: None)(tool)
@@ -313,7 +357,7 @@ class Orchestrator:
             while True:
                 attempts += 1
                 self._log(state, f"[duty {duty.name}:{step.id}] CALL {step.tool}({json.dumps(args, default=str)})")
-                out = await self.registry.call(step.tool, args)
+                out = await self._call_tool(state, step.tool, args, duty=duty)
                 op = Operation(idx + 1, step.tool, args, out.ok, out.data if out.ok else None, out.error_code,
                                out.error_message, out.retryable, out.recovery, out.duration_ms,
                                f"[duty {duty.name}:{step.id}]", out.http_status)
@@ -322,6 +366,9 @@ class Orchestrator:
                 self._track(state, op)
                 self._log(state, f"[duty {duty.name}:{step.id}] RESULT {step.tool}: "
                           + (out.to_llm_text()[:500] if out.ok else out.to_llm_text()))
+                if out.error_code == APPROVAL_REQUIRED:  # later steps depend on this write: the duty stops here
+                    state.duty["outcome"] = "pending_approval"
+                    return self._finish_pending(state, "")
                 reason = self._handoff_reason(state, op)
                 if reason:  # the same recovery policy as the planner path: a person is needed, or retries are exhausted
                     state.duty["outcome"] = "handed_off"
@@ -358,6 +405,9 @@ class Orchestrator:
         approved = bool(verdict)
         state.write_boundary = {"duty": duty.name, "before_step": step.id, "tool": step.tool, "approved": approved,
                                 "write_tools_ahead": ahead, "completed_before": event.completed}
+        if duty.unattended:
+            state.write_boundary["unattended_rationale"] = duty.unattended_rationale
+            state.duty["unattended_rationale"] = duty.unattended_rationale
         self._log(state, f"WRITE BOUNDARY of '{duty.name}' before {step.tool}: "
                   f"{'approved' if approved else 'NOT approved'} (writes ahead: {', '.join(ahead) or 'none'})")
         if approved:
@@ -396,12 +446,58 @@ class Orchestrator:
             n += 1
             path = self.run_log_dir / f"{stem}_{n}.json"
         record = {"goal": state.goal, "success": True, "user": self.user_id, "duty_used": duty_used,
-                  "duty_contract_failed": state.duty_contract_failed,
+                  "duty_contract_failed": state.duty_contract_failed, "write_decisions": state.write_decisions,
                   "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                   "operations": [{"tool": o.tool, "arguments": o.arguments, "ok": o.ok, "result": o.result,
                                   "read_only": self._read_only(o.tool)} for o in state.operations]}
         path.write_text(json.dumps(record, indent=2, default=str), encoding="utf-8")
         self._log(state, f"Run record saved to {path}")
+
+    # -- write policy (D24) ---------------------------------------------------------------------------------------------
+
+    async def _call_tool(self, state: ExecutionState, name: str, args: dict[str, Any], duty: Any = None) -> ToolOutcome:
+        """The ONE way a run calls a tool, on the planner path and the duty path alike. Reads go straight through; a write
+        goes through the policy first, so a duty's boundary is where to stop, never a substitute for the policy."""
+        safety = classify(self.registry, name)
+        if safety.is_read:
+            return await self.registry.call(name, args)
+        proposal = WriteProposal(name, dict(args), safety, state.goal, self._prior_steps(state),
+                                 duty.name if duty is not None else None)
+        rationale = duty.unattended_rationale if duty is not None and duty.unattended else None
+        decision = await self.policy.decide(proposal, unattended_rationale=rationale)
+        entry = {"tool": name, "mode": decision.mode, "allowed": decision.allowed, "reason": decision.reason,
+                 "cost_summary": safety.summary(), "duty": proposal.duty}
+        if decision.rationale:
+            entry["unattended_rationale"] = decision.rationale
+        state.write_decisions.append(entry)
+        self._log(state, f"WRITE POLICY {name}: {'allowed' if decision.allowed else 'REFUSED'} ({decision.mode}) {decision.reason}".rstrip())
+        if decision.allowed:
+            return await self.registry.call(name, args)
+        if decision.code == APPROVAL_REQUIRED:
+            state.pending_writes.append({"tool": name, "arguments": dict(args), "safety": safety.summary(),
+                                         "cost_summary": safety.summary(), "reason": decision.reason})
+        return ToolOutcome(False, name, error_code=decision.code, error_message=decision.reason, retryable=False,
+                           recovery="human")
+
+    @staticmethod
+    def _prior_steps(state: ExecutionState) -> list[dict[str, Any]]:
+        return [{"tool": o.tool, "arguments": o.arguments, "ok": o.ok, "result": o.result if o.ok else o.error_code}
+                for o in state.operations]
+
+    def _finish_pending(self, state: ExecutionState, last_text: str) -> RunResult:
+        """Writes await a person. Make the pending-approval record (never a crash, never a silent skip), then hand off."""
+        state.human_required = state.agent_recovery_skipped = True
+        path = None
+        if self.approvals_dir is not None:
+            path = approvals.create(self.approvals_dir, user=self.user_id, goal=state.goal, writes=state.pending_writes,
+                                    prior_steps=[p for p in self._prior_steps(state) if p["ok"]], duty=state.duty,
+                                    write_boundary=state.write_boundary)
+        state.pending_approval = {"artifact": str(path) if path else None,
+                                  "writes": [{"id": i, **w} for i, w in enumerate(state.pending_writes, 1)]}
+        tools = ", ".join(w["tool"] for w in state.pending_writes)
+        trigger = next((o for o in state.operations if o.error_code == APPROVAL_REQUIRED), None)
+        return self._escalate(state, f"{len(state.pending_writes)} write(s) await approval: {tools}. Nothing was run for "
+                              f"them{f'; record: {path}' if path else ''}.", last_text, trigger=trigger)
 
     # -- exception routing -------------------------------------------------------------------
 
@@ -464,7 +560,8 @@ class Orchestrator:
         """The handoff as written to disk: the two recovery=human flags are omitted unless they are true, so their
         PRESENCE means something (a handoff caused by a retryable/agent failure never carries them)."""
         data = asdict(handoff)
-        for key in ("human_required", "agent_recovery_skipped", "duty", "duty_contract_failed", "write_boundary"):
+        for key in ("human_required", "agent_recovery_skipped", "duty", "duty_contract_failed", "write_boundary",
+                    "pending_approval"):
             if data.get(key) is None:
                 data.pop(key, None)
         return data
@@ -519,6 +616,7 @@ class Orchestrator:
             human_required=True if state.human_required else None,
             agent_recovery_skipped=True if state.agent_recovery_skipped else None,
             duty=state.duty, duty_contract_failed=state.duty_contract_failed, write_boundary=state.write_boundary,
+            write_decisions=list(state.write_decisions), pending_approval=state.pending_approval,
         )
         self._log(state, f"HANDOFF: {reason}")
         if self.handoff_dir is not None:
@@ -530,7 +628,7 @@ class Orchestrator:
                 path = self.handoff_dir / f"{stem}_{n}.json"
             path.write_text(json.dumps(self._handoff_json(handoff), indent=2, default=str), encoding="utf-8")
             self._log(state, f"Handoff snapshot saved to {path}")
-        return RunResult(False, last_text, state, handoff)
+        return RunResult(False, last_text, state, handoff, pending_approval=state.pending_approval)
 
     def _log(self, state: ExecutionState, line: str) -> None:
         state.note(line)

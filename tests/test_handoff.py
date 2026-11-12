@@ -63,7 +63,7 @@ class ScriptedLLM:
 
 async def run(tmp_path: Path, llm: ScriptedLLM, **kw):
     async with SpyRegistry(SERVERS, pattern="retail_server.py") as reg:
-        orch = Orchestrator(reg, client=llm, handoff_dir=tmp_path, user_id="tester", **kw)
+        orch = Orchestrator(reg, allow_writes=True, client=llm, handoff_dir=tmp_path, user_id="tester", **kw)
         result = await orch.run(GOAL)
         return result, reg.calls
 

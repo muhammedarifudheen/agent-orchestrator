@@ -109,7 +109,7 @@ def check_inventory(sku: str, qty: int) -> dict:
     }
 
 
-@tool(side_effect="write", idempotent=False)
+@tool(side_effect="write", idempotent=False, reversible=False, scope="single")
 def create_order(sku: str, qty: int, customer_id: str) -> dict:
     """Create an order and reserve (decrement) stock. Status starts as PENDING_PAYMENT.
 
@@ -151,7 +151,7 @@ def create_order(sku: str, qty: int, customer_id: str) -> dict:
     return dict(_ORDERS[order_id])
 
 
-@tool(side_effect="money", idempotent=False)
+@tool(side_effect="money", idempotent=False, reversible=False, scope="external")
 def charge_payment(order_id: str, amount: float) -> dict:
     """Charge the customer for an order. Moves real money.
 
@@ -195,7 +195,7 @@ def charge_payment(order_id: str, amount: float) -> dict:
     return dict(_PAYMENTS[payment_id])
 
 
-@tool(side_effect="write", idempotent=False)
+@tool(side_effect="write", idempotent=False, reversible=False, scope="external")
 def create_shipment(order_id: str, address: str) -> dict:
     """Create a shipment for a PAID order. Side effect: books a carrier pickup.
 
@@ -276,7 +276,7 @@ def check_refund_eligibility(order_id: str) -> dict:
             "refundable_amount": order["total_amount"] if eligible else 0.0, "currency": order["currency"]}
 
 
-@tool(side_effect="money", idempotent=False)
+@tool(side_effect="money", idempotent=False, reversible=False, scope="external")
 def issue_refund(order_id: str, amount: float) -> dict:
     """Refund a paid order back to the customer. Moves real money.
 
@@ -316,7 +316,7 @@ def issue_refund(order_id: str, amount: float) -> dict:
     return dict(_REFUNDS[refund_id])
 
 
-@tool(side_effect="write", idempotent=False)
+@tool(side_effect="write", idempotent=False, reversible=False, scope="external")
 def notify_customer(customer_id: str, message: str) -> dict:
     """Send a customer a notification (email) about their order. Side effect: a message is sent.
 

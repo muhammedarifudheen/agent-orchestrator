@@ -61,6 +61,12 @@ class FakeRegistry:
                                   "properties": {"date": {"type": "string"}, "qty": {"type": "integer"}}}}
                 for t in self.tools]
 
+    def is_read_only(self, name):  # these scripted tools stand for reads: this file tests failure routing, not writes
+        return True
+
+    def tool_meta(self, name):
+        return {"writes": False}
+
     async def call(self, name, args):
         assert self.outcomes, "orchestrator kept calling tools after it should have stopped"
         return self.outcomes.pop(0)
@@ -87,7 +93,7 @@ class FakeLLM:
 
 async def run(outcomes, **kw):
     llm = FakeLLM(outcomes)
-    result = await Orchestrator(FakeRegistry(outcomes), client=llm, **kw).run("goal")
+    result = await Orchestrator(FakeRegistry(outcomes), allow_writes=True, client=llm, **kw).run("goal")
     return result, llm
 
 
@@ -118,7 +124,7 @@ class HumanFlagsTests(unittest.IsolatedAsyncioTestCase):
         import tempfile
         for outcomes, present in (([declined()], True), ([transient("t__a"), transient("t__b")], False)):
             with tempfile.TemporaryDirectory() as d:
-                await Orchestrator(FakeRegistry(outcomes), client=FakeLLM(outcomes), handoff_dir=Path(d)).run("goal")
+                await Orchestrator(FakeRegistry(outcomes), allow_writes=True, client=FakeLLM(outcomes), handoff_dir=Path(d)).run("goal")
                 data = json.loads(next(Path(d).glob("*.json")).read_text(encoding="utf-8"))
             self.assertEqual(("human_required" in data, "agent_recovery_skipped" in data), (present, present))
             if present:

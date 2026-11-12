@@ -36,7 +36,7 @@ if str(ROOT) not in sys.path:  # allow `python learning/induce_duty.py` as well 
 
 from agent.duties import (  # noqa: E402
     DEFAULT_DUTIES_DIR, DUTY_CONFIDENCE_THRESHOLD, DutyError, DutyLibrary, match_pattern, normalize, parse_duty,
-    validate_duty_data,
+    substitute_setup, validate_duty_data,
 )
 
 MIN_RUNS = 3  # D23: fewer identical-sequence runs than this produce nothing. Change only with CLAUDE.md D23.
@@ -44,6 +44,30 @@ UNREVIEWED = "PROPOSED-UNREVIEWED"
 STATES = ("", "approved", "rejected", "applied")  # where a proposal can be (below proposals/duties/)
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 _MISSING = object()
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_ID_LIKE = re.compile(r"^[A-Za-z0-9]{1,6}-[A-Za-z0-9_-]*\d[A-Za-z0-9_-]*$")
+_TRAIL = ",;:!?.)\"'"
+TODAY_PLUS = "$today+30"  # what an ISO date becomes in the example intent (agent.duties.substitute_setup expands it)
+EXAMPLE_NOTE = (
+    "Every ISO date in the example intent was replaced by $today+30, so the example stays bookable. Id-like tokens "
+    "(order ids, SKUs, customer ids) keep the FIRST run's value, because the example is a replay fixture: a duty whose "
+    "example needs state the source runs created is REJECTED by the install-time contract test until a human adds "
+    "`example.setup` (or edits the example). The raw goals below are evidence only; the duty itself holds no date."
+)
+
+
+def _var_kind(token: str) -> str | None:
+    """'date' or 'id' when a goal token is an ISO date / an id-like token (trailing punctuation ignored), else None."""
+    core = token.rstrip(_TRAIL)
+    if _ISO_DATE.fullmatch(core):
+        return "date"
+    if _ID_LIKE.match(core):
+        return "id"
+    return None
+
+
+def _looks_like_date_or_id(value: Any) -> bool:
+    return isinstance(value, str) and (bool(_ISO_DATE.search(value)) or bool(_ID_LIKE.match(value.rstrip(_TRAIL))))
 
 
 @dataclass
@@ -121,10 +145,18 @@ def _existing_proposals(proposals_dir: Path) -> tuple[set[str], list[set[str]]]:
 
 # -- the pattern ---------------------------------------------------------------------------------------------------
 
-def build_pattern(goals: list[str]) -> tuple[str, list[list[str]]]:
-    """(pattern, captures). The pattern is the words common to every goal, in sequence, with `{slot0}`, `{slot1}`... where
-    they differ; captures[run][slot] is the text each run had there (possibly several words)."""
-    toks = [normalize(g).split() for g in goals]
+def build_pattern(goals: list[str]) -> tuple[str, list[list[str]], list[str | None]]:
+    """(pattern, captures, kinds). The pattern is the words common to every goal, in sequence, with `{slot0}`, `{slot1}`...
+    where they differ; captures[run][slot] is the text each run had there (possibly several words). An ISO date or an id-like
+    token is ALWAYS a placeholder, even when identical in every run (kinds[slot] is "date"/"id" for those, else None)."""
+    orig = [normalize(g).split() for g in goals]
+    toks = [list(t) for t in orig]
+    for r, t in enumerate(toks):
+        for i, w in enumerate(t):
+            if _var_kind(w):
+                if w != w.rstrip(_TRAIL):
+                    raise _Skip(f"the goal token {w!r} is a date/id with punctuation attached, which a pattern cannot hold")
+                t[i] = f"\x00{r}:{i}"  # unique per run and position, so it is never a word the goals share
     ref = toks[0]
     maps: list[dict[int, int]] = [{i: i for i in range(len(ref))}]
     common = set(range(len(ref)))
@@ -140,14 +172,17 @@ def build_pattern(goals: list[str]) -> tuple[str, list[list[str]]]:
         raise _Skip("the goals share no word, so there is no pattern to learn")
     words: list[str] = []
     captures: list[list[str]] = [[] for _ in goals]
+    kinds: list[str | None] = []
     for g in range(len(kept) + 1):
-        texts = []
+        texts, var = [], None
         for r, t in enumerate(toks):
             lo = maps[r][kept[g - 1]] + 1 if g else 0
             hi = maps[r][kept[g]] if g < len(kept) else len(t)
-            texts.append(" ".join(t[lo:hi]))
-        if all(texts) and len(set(texts)) > 1:
+            texts.append(" ".join(orig[r][lo:hi]))
+            var = var or next((_var_kind(w) for w in orig[r][lo:hi] if _var_kind(w)), None)
+        if all(texts) and (len(set(texts)) > 1 or var):
             words.append("{slot%d}" % (len([w for w in words if w.startswith("{slot")])))
+            kinds.append(var)
             for r, text in enumerate(texts):
                 captures[r].append(text)
         elif any(texts) and not all(t == texts[0] for t in texts):
@@ -156,7 +191,7 @@ def build_pattern(goals: list[str]) -> tuple[str, list[list[str]]]:
             words.extend(texts[0].split())  # the same text in every goal: part of the pattern
         if g < len(kept):
             words.append(ref[kept[g]])
-    return " ".join(words), captures
+    return " ".join(words), captures, kinds
 
 
 # -- binding the arguments -----------------------------------------------------------------------------------------
@@ -213,22 +248,30 @@ def _has_dollar(value: Any) -> bool:
     return isinstance(value, str) and value.startswith("$")
 
 
-def _slot_names(order: list[tuple[int, str]], count: int) -> list[str]:
-    """Name each slot after the first argument that uses it; unused ones are slot1, slot2... (deterministic)."""
+def _slot_names(order: list[tuple[int, str]], count: int, kinds: list[str | None] | None = None) -> list[str]:
+    """Name each slot after the first argument that uses it; unused ones are `date`/`id` (by kind) or slot1, slot2...
+    (deterministic)."""
+    kinds = kinds or [None] * count
     names: dict[int, str] = {}
     taken: set[str] = set()
-    for slot, arg in order:
-        if slot in names:
-            continue
-        base = re.sub(r"[^a-z0-9_]", "_", arg.lower())
-        if not _NAME.match(base):
-            continue
+
+    def claim(slot: int, base: str) -> None:
         name, n = base, 1
         while name in taken:
             n += 1
             name = f"{base}_{n}"
         names[slot] = name
         taken.add(name)
+
+    for slot, arg in order:
+        if slot in names:
+            continue
+        base = re.sub(r"[^a-z0-9_]", "_", arg.lower())
+        if _NAME.match(base):
+            claim(slot, base)
+    for slot in range(count):
+        if slot not in names and kinds[slot]:
+            claim(slot, kinds[slot])
     for slot in range(count):
         if slot not in names:
             n = slot + 1
@@ -284,6 +327,9 @@ def _bind_steps(group: list[dict[str, Any]], captures: list[list[str]], n_slots:
                 if all(type(v) is type(vals[0]) and v == vals[0] for v in vals):
                     if _has_dollar(vals[0]):
                         raise _Skip(f"{where}: the literal {vals[0]!r} starts with $, which a duty reads as a reference")
+                    if _looks_like_date_or_id(vals[0]):
+                        raise _Skip(f"{where}: the literal {vals[0]!r} looks like a date/id taken from the source runs "
+                                    "(it is not part of the goal and not found in an earlier result) and cannot be generalised")
                     bound, source = vals[0], "literal"
                 else:  # (d)
                     raise _Skip(f"{where}: differs between runs ({_show(vals)}) and is neither part of the goal nor a "
@@ -307,10 +353,10 @@ def _build(group: list[dict[str, Any]], name_for, duties_dir: Path) -> tuple[str
     if not any(writes):
         raise _Skip("a duty needs a write boundary: every step of this sequence is read-only")
     boundary, last_write = writes.index(True), len(writes) - 1 - writes[::-1].index(True)
-    pattern, captures = build_pattern([run["goal"] for run in group])
+    pattern, captures, kinds = build_pattern([run["goal"] for run in group])
     n_slots = len(captures[0])
     steps, uses, bindings, ids = _bind_steps(group, captures, n_slots)
-    names = _slot_names(uses, n_slots)
+    names = _slot_names(uses, n_slots, kinds)
     for step in steps:
         step["args"] = {k: (f"$intent.{names[v[1]]}" if isinstance(v, tuple) else v) for k, v in step["args"].items()}
     for b in bindings:
@@ -341,14 +387,17 @@ def _build(group: list[dict[str, Any]], name_for, duties_dir: Path) -> tuple[str
         "steps": steps,
         "write_boundary": {"before": ids[boundary]},
         "success": success,
-        "example": {"intent": group[0]["goal"], "expect": "success"},
+        "example": {"intent": _ISO_DATE.sub(TODAY_PLUS, group[0]["goal"]), "expect": "success"},
     }
+    if _ISO_DATE.search(yaml.safe_dump(data, allow_unicode=True)):
+        raise _Skip("the proposed duty would still hold a literal date taken from the source runs (one the goal does not "
+                    "carry as a whole word), which cannot be generalised")
     try:
         validate_duty_data(data, duties_dir)
         duty = parse_duty(data)
     except DutyError as exc:
         raise _Skip(f"the proposed duty is not valid: {exc}") from exc
-    match = match_pattern(duty, pattern, group[0]["goal"])
+    match = match_pattern(duty, pattern, substitute_setup(data["example"]["intent"], {}))
     if match is None or match.confidence != 1.0:
         raise _Skip("the proposed pattern does not match its own example goal exactly")
     return name, data, bindings
@@ -361,7 +410,8 @@ def _write(folder: Path, name: str, data: dict[str, Any], files: list[str], grou
     diff = "".join(difflib.unified_diff([], text.splitlines(keepends=True), fromfile="/dev/null",
                                         tofile=f"duties/{name}.yaml"))
     header = f"# proposed from {len(files)} runs: {', '.join(files)}\n"
-    evidence = {"runs": files, "tool_sequence": tools, "goals": group_goals, "bindings": bindings}
+    evidence = {"runs": files, "tool_sequence": tools, "goals": group_goals, "bindings": bindings,
+                "example_note": EXAMPLE_NOTE}
     for suffix, content in ((".duty.yaml", text), (".duty.diff", header + diff), (".contract_test.py", contract_test_source(name)),
                             (".evidence.json", json.dumps(evidence, indent=2, default=str) + "\n")):
         (folder / f"{name}{suffix}").write_text(content, encoding="utf-8", newline="\n")

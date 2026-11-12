@@ -85,6 +85,13 @@ def check_semantics(spec: dict[str, Any]) -> None:
                     f"{n}: REFUSED. side_effect={op['side_effect']} operations need "
                     "review.safety_fields: reviewed (side_effect, idempotent, retryable flags, requires) "
                     "signed off by a human before a server is generated.")
+            missing = [k for k in ("reversible", "scope") if k not in op]
+            if missing:
+                raise SpecError(f"{n}: side_effect={op['side_effect']} must state {' and '.join(missing)} "
+                                "(reversible: true|false, scope: single|batch|external); the orchestrator refuses a "
+                                "write tool whose blast radius is not declared (CLAUDE.md D24)")
+        elif "reversible" in op or "scope" in op:
+            raise SpecError(f"{n}: a read operation takes no reversible/scope")
 
 
 # -- docstring ---------------------------------------------------------------------------------
@@ -191,7 +198,8 @@ def render_server(spec: dict[str, Any], spec_file: str, digest: str) -> str:
     ]
     for op in spec["operations"]:
         args = ", ".join(f'"{p["name"]}": {p["name"]}' for p in op["params"])
-        idem = f", idempotent={_is_idempotent(op)}" if op["side_effect"] != "read" else ""
+        idem = (f", idempotent={_is_idempotent(op)}, reversible={op['reversible']}, scope=\"{op['scope']}\""
+                if op["side_effect"] != "read" else "")
         out += [
             "", "", f'@tool(side_effect="{op["side_effect"]}"{idem})',
             f"def {op['name']}{_signature(op)}:",

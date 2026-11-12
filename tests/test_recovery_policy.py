@@ -42,7 +42,7 @@ class Scripted:
 
 async def run(tmp_path, pattern, llm, goal="goal", **kw):
     async with SpyRegistry(SERVERS, pattern=pattern) as reg:
-        result = await Orchestrator(reg, client=llm, handoff_dir=tmp_path, user_id="tester", **kw).run(goal)
+        result = await Orchestrator(reg, allow_writes=True, client=llm, handoff_dir=tmp_path, user_id="tester", **kw).run(goal)
         return result, reg.calls
 
 

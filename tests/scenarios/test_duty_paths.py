@@ -57,7 +57,7 @@ async def test_a_matching_request_runs_the_duty_not_the_planner_and_the_write_ga
     llm = ScriptedLLM()
     async with SpyRegistry(SERVERS, pattern="travel_server.py") as reg:
         gate = RecordingGate(reg)
-        orch = Orchestrator(reg, client=llm, handoff_dir=tmp_path, user_id="tester", write_gate=gate)
+        orch = Orchestrator(reg, allow_writes=True, client=llm, handoff_dir=tmp_path, user_id="tester", write_gate=gate)
         result = await orch.run(book_flight_goal())
 
         assert result.success and result.duty_used == "book_flight", result.final_message
@@ -80,7 +80,7 @@ async def test_a_refusing_write_gate_stops_the_run_with_nothing_written_and_says
     llm = ScriptedLLM()
     async with SpyRegistry(SERVERS, pattern="travel_server.py") as reg:
         gate = RecordingGate(reg, verdict=False)
-        orch = Orchestrator(reg, client=llm, handoff_dir=tmp_path, user_id="tester", write_gate=gate)
+        orch = Orchestrator(reg, allow_writes=True, client=llm, handoff_dir=tmp_path, user_id="tester", write_gate=gate)
         result = await orch.run(book_flight_goal())
 
         assert not result.success and result.handoff is not None
@@ -101,19 +101,21 @@ async def test_an_async_write_gate_is_awaited(tmp_path):
         return True
 
     async with SpyRegistry(SERVERS, pattern="travel_server.py") as reg:
-        orch = Orchestrator(reg, client=ScriptedLLM(), handoff_dir=tmp_path, user_id="tester", write_gate=gate)
+        orch = Orchestrator(reg, allow_writes=True, client=ScriptedLLM(), handoff_dir=tmp_path, user_id="tester", write_gate=gate)
         result = await orch.run(book_flight_goal())
     assert result.success and seen == ["travel__book_flight"]
 
 
 async def test_a_pre_boundary_step_that_is_no_longer_read_only_is_refused_before_it_runs(tmp_path, monkeypatch):
-    """Runtime enforcement, independent of review: if a server now reports a pre-boundary tool as a write, the duty
-    does not run it (nothing reaches a server), the failure is recorded, and the planner takes over."""
+    """Run-time enforcement, independent of the load-time check (defense in depth): if a server reclassifies a pre-boundary
+    tool AFTER the duty was validated, the duty does not run it (nothing reaches a server), the failure is recorded, and the
+    planner takes over. The load-time check is switched off here to reach this branch; it has its own test."""
     llm = ScriptedLLM([("text", "I will not do that.")])
     async with SpyRegistry(SERVERS, pattern="travel_server.py") as reg:
         real = reg.is_read_only
         monkeypatch.setattr(reg, "is_read_only", lambda name: False if name == "travel__search_flights" else real(name))
-        orch = Orchestrator(reg, client=llm, handoff_dir=tmp_path, user_id="tester")
+        orch = Orchestrator(reg, allow_writes=True, client=llm, handoff_dir=tmp_path, user_id="tester")
+        monkeypatch.setattr(orch, "_duty_load_errors", lambda state: {})
         result = await orch.run(book_flight_goal())
         assert reg.calls == []
         assert result.duty_contract_failed == "book_flight" and result.duty_used is None
@@ -124,7 +126,7 @@ async def test_a_pre_boundary_step_that_is_no_longer_read_only_is_refused_before
 async def test_a_duty_failure_with_recovery_human_hands_off_by_the_same_policy_as_the_planner(tmp_path, monkeypatch):
     monkeypatch.setenv("TRAVEL_FAIL_MODE", "all_down")  # SERVICE_UNAVAILABLE retryable=true, recovery=agent
     async with SpyRegistry(SERVERS, pattern="travel_server.py") as reg:
-        orch = Orchestrator(reg, client=ScriptedLLM(), handoff_dir=tmp_path, user_id="tester")
+        orch = Orchestrator(reg, allow_writes=True, client=ScriptedLLM(), handoff_dir=tmp_path, user_id="tester")
         result = await orch.run(book_flight_goal())
         assert not result.success
         assert reg.calls == ["travel__search_flights", "travel__search_flights"], "one retry, then a handoff"
@@ -141,7 +143,7 @@ async def test_an_unmatched_request_goes_to_the_planner(tmp_path):
         [("text", "Searching."), ("call", "travel__search_flights", {"origin": "DEL", "destination": "BOM", "date": future()})],
         [("text", "Found flights.")])
     async with SpyRegistry(SERVERS, pattern="travel_server.py") as reg:
-        orch = Orchestrator(reg, client=llm, handoff_dir=tmp_path, user_id="tester")
+        orch = Orchestrator(reg, allow_writes=True, client=llm, handoff_dir=tmp_path, user_id="tester")
         result = await orch.run("what flights go from DEL to BOM next month?")
         assert result.success and result.duty_used is None
         assert llm.calls == 2
@@ -155,7 +157,7 @@ async def test_a_request_that_fits_a_duty_too_weakly_goes_to_the_planner_and_say
     goal = f"book flight from DEL to BOM on {future()} for Asha Verma at asha@example.com"
     llm = ScriptedLLM([("text", "That is not something I will book without more detail.")])
     async with SpyRegistry(SERVERS, pattern="travel_server.py") as reg:
-        orch = Orchestrator(reg, client=llm, handoff_dir=tmp_path, user_id="tester")
+        orch = Orchestrator(reg, allow_writes=True, client=llm, handoff_dir=tmp_path, user_id="tester")
         result = await orch.run(goal)
         assert result.duty_used is None and llm.calls == 1 and reg.calls == []
         assert result.state.duty["outcome"] == "below_threshold" and result.state.duty["name"] == "book_flight"
@@ -165,7 +167,7 @@ async def test_a_request_that_fits_a_duty_too_weakly_goes_to_the_planner_and_say
 async def test_with_duties_switched_off_the_orchestrator_behaves_as_before(tmp_path):
     llm = ScriptedLLM([("text", "No tools needed.")])
     async with SpyRegistry(SERVERS, pattern="travel_server.py") as reg:
-        orch = Orchestrator(reg, client=llm, handoff_dir=tmp_path, user_id="tester", duties=None)
+        orch = Orchestrator(reg, allow_writes=True, client=llm, handoff_dir=tmp_path, user_id="tester", duties=None)
         result = await orch.run(book_flight_goal())
         assert result.duty_used is None and llm.calls == 1 and reg.calls == [] and result.state.duty is None
 
@@ -176,7 +178,7 @@ async def test_a_duty_whose_contract_fails_before_any_write_falls_back_to_the_pl
     """The reverse route has no flights in the mock, so `$search.0.flight_id` cannot resolve: a REAL contract failure."""
     llm = ScriptedLLM([("text", "No flights operate on that route.")])
     async with SpyRegistry(SERVERS, pattern="travel_server.py") as reg:
-        orch = Orchestrator(reg, client=llm, handoff_dir=tmp_path, user_id="tester")
+        orch = Orchestrator(reg, allow_writes=True, client=llm, handoff_dir=tmp_path, user_id="tester")
         result = await orch.run(book_flight_goal(origin="BOM", destination="DEL"))
         assert reg.calls == ["travel__search_flights"]  # the read ran, then nothing was written
         assert not travel_server._BOOKINGS
@@ -194,7 +196,7 @@ async def test_the_contract_failure_reaches_the_handoff_when_the_planner_then_fa
         [("call", "banking__get_account_balance", {"account_id": "ACCT-NOPE-1"})],
         [("call", "banking__get_account_balance", {"account_id": "ACCT-NOPE-2"})])
     async with SpyRegistry(SERVERS, pattern="*_server.py") as reg:
-        orch = Orchestrator(reg, client=llm, handoff_dir=tmp_path, user_id="tester")
+        orch = Orchestrator(reg, allow_writes=True, client=llm, handoff_dir=tmp_path, user_id="tester")
         result = await orch.run(book_flight_goal(origin="BOM", destination="DEL"))
         assert not result.success and result.handoff is not None
     data = handoff(tmp_path)
@@ -213,7 +215,7 @@ async def test_a_contract_failure_after_the_writes_tells_the_planner_what_was_al
     library = make_library(tmp_path_factory.mktemp("lib"), impossible_success, only=("book_flight",))
     llm = ScriptedLLM([("text", "The booking and the email are already done; nothing to repeat.")])
     async with SpyRegistry(SERVERS, pattern="travel_server.py") as reg:
-        orch = Orchestrator(reg, client=llm, handoff_dir=tmp_path, user_id="tester", duties=library)
+        orch = Orchestrator(reg, allow_writes=True, client=llm, handoff_dir=tmp_path, user_id="tester", duties=library)
         result = await orch.run(book_flight_goal())
         assert reg.calls == ["travel__search_flights", "travel__book_flight", "travel__send_confirmation"]
         assert result.duty_contract_failed == "book_flight"
@@ -238,6 +240,6 @@ async def test_a_new_duty_dropped_into_the_directory_is_used_with_no_code_change
     library = type(library)(lib_dir / "duties")
     assert sorted(library.duties) == ["reserve_seat"], library.errors
     async with SpyRegistry(SERVERS, pattern="travel_server.py") as reg:
-        orch = Orchestrator(reg, client=ScriptedLLM(), handoff_dir=tmp_path, user_id="tester", duties=library)
+        orch = Orchestrator(reg, allow_writes=True, client=ScriptedLLM(), handoff_dir=tmp_path, user_id="tester", duties=library)
         result = await orch.run(book_flight_goal().replace("book a flight", "reserve a seat"))
         assert result.success and result.duty_used == "reserve_seat"

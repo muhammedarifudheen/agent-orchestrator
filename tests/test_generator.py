@@ -28,7 +28,7 @@ PAYMENTS = {
         "summary": "Create a payment of the given amount.",
         "when_to_call": "Call once per payment, after the amount is confirmed.",
         "side_effect": "money",
-        "idempotent": False,
+        "idempotent": False, "reversible": False, "scope": "external",
         "request": {"method": "POST", "path": "/payments"},
         "params": [{"name": "amount", "type": "number", "in": "body", "required": True,
                     "description": "Amount to pay, greater than zero.", "constraints": {"minimum": 0.01}}],

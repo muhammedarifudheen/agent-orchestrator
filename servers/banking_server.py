@@ -147,7 +147,7 @@ def get_account_balance(account_id: str) -> dict:
             "as_of": _now()}
 
 
-@tool(side_effect="money", idempotent=False)
+@tool(side_effect="money", idempotent=False, reversible=False, scope="single")
 def transfer_funds(from_acct: str, to_acct: str, amount: float) -> dict:
     """Move money between two accounts of the same currency. Executes IMMEDIATELY.
 
@@ -229,7 +229,7 @@ def _next_id(kind: str, prefix: str) -> str:
     return f"{prefix}{_COUNTERS[kind]:04d}"
 
 
-@tool(side_effect="write", idempotent=False)
+@tool(side_effect="write", idempotent=False, reversible=False, scope="single")
 def create_customer(name: str, document_id: str) -> dict:
     """Create a new customer record from a name and a document number. Side effect: a customer is created.
 
@@ -262,7 +262,7 @@ def create_customer(name: str, document_id: str) -> dict:
     return {"customer_id": customer_id, "name": name.strip(), "kyc_status": status}
 
 
-@tool(side_effect="write", idempotent=False)
+@tool(side_effect="write", idempotent=False, reversible=False, scope="single")
 def open_account(customer_id: str, currency: str) -> dict:
     """Open a new, empty account for a KYC-VERIFIED customer. Side effect: an account is created.
 
@@ -298,7 +298,7 @@ def open_account(customer_id: str, currency: str) -> dict:
             "status": "ACTIVE", "available_balance": 0.0}
 
 
-@tool(side_effect="write", idempotent=False)
+@tool(side_effect="write", idempotent=False, reversible=False, scope="external")
 def send_welcome(customer_id: str, account_id: str) -> dict:
     """Send the new customer a welcome message with their account details. Side effect: a message is sent.
 

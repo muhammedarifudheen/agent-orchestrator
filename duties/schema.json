@@ -4,6 +4,8 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["name", "description", "review", "intent_patterns", "parameters", "steps", "write_boundary", "success", "example"],
+  "if": {"properties": {"unattended": {"const": true}}, "required": ["unattended"]},
+  "then": {"required": ["unattended_rationale"]},
   "definitions": {
     "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
     "toolname": {"type": "string", "pattern": "^[a-z0-9_]+__[a-z0-9_]+$"},
@@ -13,6 +15,8 @@
   "properties": {
     "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "Must equal the file stem."},
     "description": {"type": "string", "minLength": 1},
+    "unattended": {"type": "boolean", "description": "true = this duty may cross its write boundary without a per-run approval. Default false: a write inside a duty needs allow_writes or an approver like any other write (CLAUDE.md D22/D24)."},
+    "unattended_rationale": {"type": "string", "pattern": "\\S", "description": "MANDATORY with unattended: true: why this duty is safe to run unattended. Recorded with every run and reviewed like any other decision."},
     "review": {
       "type": "object",
       "additionalProperties": false,

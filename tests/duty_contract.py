@@ -79,7 +79,7 @@ async def check_duty_contract(name: str, directory: Path | None = None) -> None:
                         return True
 
                     model = NoModel()
-                    result = await Orchestrator(registry, client=model, duties=alone, write_gate=gate, user_id="contract").run(intent)
+                    result = await Orchestrator(registry, allow_writes=True, client=model, duties=alone, write_gate=gate, user_id="contract").run(intent)
                     if not (result.success and result.duty_used == name):
                         problems.append(
                             f"{name}: the example did not complete as this duty: success={result.success} "

@@ -114,6 +114,8 @@
         "when_to_call": {"type": "string", "minLength": 10},
         "side_effect": {"enum": ["read", "write", "money"]},
         "idempotent": {"type": "boolean"},
+        "reversible": {"type": "boolean", "description": "Write/money operations only: true = the system itself can undo one call (no person and no counterparty needed). Surfaced to the approver (CLAUDE.md D24)."},
+        "scope": {"enum": ["single", "batch", "external"], "description": "Write/money operations only: the blast radius of ONE call: one record, many records, or something outside the system (a payment gateway, a message to a person). Surfaced to the approver (CLAUDE.md D24)."},
         "requires": {"type": "array", "items": {"type": "string"}},
         "needs_review": {"type": "boolean", "description": "true = a person must review this operation before a server is generated (low ingestion confidence, writes, unsupported constructs). The generator refuses any spec that still contains it."},
         "confidence": {"type": "number", "minimum": 0, "maximum": 1, "description": "How sure the ingestor is that this operation was extracted correctly."},

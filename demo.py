@@ -90,8 +90,10 @@ async def main() -> int:
     async with ToolRegistry(ROOT / "servers") as registry:
         for name, err in registry.connect_errors.items():
             print(f"WARNING: server '{name}' failed to start: {err}")
+        # Writes (booking a flight, sending an email) are refused unless the run is allowed to write (CLAUDE.md D24):
+        # without --allow-writes the demo stops with a pending-approval record instead of booking.
         orch = Orchestrator(registry, client=ScriptedLLM() if offline else None,
-                            handoff_dir=ROOT / "handoffs", on_log=print)
+                            handoff_dir=ROOT / "handoffs", on_log=print, allow_writes="--allow-writes" in sys.argv)
         result = await orch.run(GOAL)
     print("\n--- Outcome ---")
     if result.success:

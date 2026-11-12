@@ -2,6 +2,8 @@
 __pycache__/
 .env
 handoffs/*.json
+handoffs/approvals/
+approvals/
 inbox/*
 !inbox/.gitkeep
 

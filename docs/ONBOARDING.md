@@ -14,7 +14,7 @@ git switch -c onboarding-practice
 
 The first command creates `.venv` only if it is missing (re-running venv creation with the venv's own interpreter fails with `Permission denied`). If you have uncommitted changes, `git switch -c` carries them to the new branch and `git switch main` at the end brings them back; the Finish step touches only the files this page creates.
 
-Expected last line: `763 passed, 26 skipped in <about 80-170> s`, exit code 0. (The count changes when tests are added;
+Expected last line: `837 passed, 26 skipped in <about 90-180> s`, exit code 0. (The count changes when tests are added;
 what must not change is `0 failed`.) pip may print a "new release of pip is available" notice; it is harmless.
 You do NOT need an `ANTHROPIC_API_KEY` for anything on this page. Every command below spells out `.venv\Scripts\python` on purpose: bare `python` is
 your system Python, which does not have the project's packages (`ModuleNotFoundError: No module named 'jsonschema'`).
@@ -80,8 +80,11 @@ Expected: 1 passed (about 6-20 s). The same flow with the verification stubbed r
 
 ## v. Add a new write tool (safety metadata)
 
-There is no `reversible`/`scope` field in this project. The write-safety metadata is `side_effect` (`read|write|money`),
-`idempotent` (true/false) and `review.safety_fields` (`reviewed|unreviewed`) plus `review.reviewer` (a named person).
+The write-safety metadata is `side_effect` (`read|write|money`), `idempotent` (true/false), `reversible` (true/false: can the
+system itself undo one call?), `scope` (`single|batch|external`: the blast radius of one call) and `review.safety_fields`
+(`reviewed|unreviewed`) plus `review.reviewer` (a named person). The orchestrator refuses to run any write tool unless the run was
+started with `allow_writes=True` or an approver said yes (`python demo.py --offline` stops at a pending-approval record; add
+`--allow-writes` to let it book), and it refuses a write tool that did not declare `reversible` and `scope`.
 Append this operation to the END of `specs\mycat.yaml` (its last section is `operations:`; the snippet continues that list) and generate:
 
 ```powershell
@@ -91,6 +94,8 @@ Append this operation to the END of `specs\mycat.yaml` (its last section is `ope
   when_to_call: Call when the user wants to contribute a fact; not repeatable, a second call creates a duplicate.
   side_effect: write
   idempotent: false
+  reversible: false
+  scope: single
   request:
     method: POST
     path: /facts
@@ -128,7 +133,8 @@ Add-Content -Encoding utf8 specs\mycat.yaml "    reviewer: Your Name"
 .venv\Scripts\python -m pytest tests\test_contract.py -q -k mycat
 ```
 
-Expected: two `wrote:` lines, then `14 passed`. ALWAYS regenerate after editing a spec and before running the contract test: the test reads the
+Expected: two `wrote:` lines, then `14 passed`. (Leave out `reversible` or `scope` from the snippet and the generator refuses with
+`must state reversible and scope ...`; that is the write policy's metadata rule, checked at generation time.) ALWAYS regenerate after editing a spec and before running the contract test: the test reads the
 new spec but the committed server is stale, and fails with `submit_fact:ok` until you do. Ingestion never signs off a write: ingested specs
 (`pipeline.py`) flag every write `needs_review: true` and the generator refuses it until a named person clears it.
 
@@ -142,7 +148,7 @@ The 26 skips are all deliberate and each is listed with its reason in `AUDIT.md`
 internet), 7 need `ANTHROPIC_API_KEY` (a real model), 2 are `slow` tests (`--runslow`: the end-to-end apply test and the audit's
 run-every-cited-test), 1 is "retail: no outage probe", and 2 are probes started only by another test.
 
-Counts change as you add tests: after steps i-v the suite shows about `787 passed, 30 skipped` (the practice system adds tests and 4 live
+Counts change as you add tests: after steps i-v the suite shows about `861 passed, 30 skipped` (the practice system adds tests and 4 live
 skips) and `2 failed`: `test_every_discovered_file_is_audited_exactly_once` and `test_a_server_added_without_updating_audit_md_fails_by_name` in
 `tests/test_audit_completeness.py`, which is expected until `AUDIT.md` lists `mycat` (step viii).
 

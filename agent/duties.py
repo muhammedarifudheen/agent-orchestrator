@@ -49,10 +49,9 @@ class BoundaryEvent:
 
 
 def allow_reviewed_duty(event: BoundaryEvent) -> bool:
-    """The default write gate (D22): a duty in duties/ was reviewed by a named person as THIS sequence, so crossing its own
-    boundary is allowed. The point of the boundary is not this default; it is that the gate is consulted first, every time,
-    with the full list of writes ahead, and that nothing before it can write. A caller that wants a per-run approval
-    (an interactive confirm, a ticket, a second person) passes its own `write_gate`; a False return stops the run."""
+    """The default write gate: a VETO hook that vetoes nothing. It cannot grant a write (D22/D24): permission comes from the
+    write policy (allow_writes, an approver, or a duty declared `unattended` with a rationale). The boundary tells the
+    orchestrator WHERE to stop, not WHETHER; a caller's gate can add a veto here (a False return stops the run)."""
     return True
 
 
@@ -107,6 +106,8 @@ class Duty:
     success: dict[str, Any]
     example: dict[str, Any]
     path: Path | None = None
+    unattended: bool = False  # D22/D24: may cross the write boundary without a per-run approval
+    unattended_rationale: str | None = None  # mandatory with unattended: why that is safe for THIS duty
 
     @property
     def boundary_index(self) -> int:
@@ -139,15 +140,71 @@ def _walk(value: Any, segments: list[str], where: str) -> Any:
     return value
 
 
+_WHERE = re.compile(r"^(?P<field>[A-Za-z_][\w.]*)\s*(?P<op>==|!=|>=|<=|>|<)\s*(?P<value>.+?)\s*$")
+
+
+def _scalar(text: str) -> Any:
+    """A filter value: true/false/null, a number, or a (optionally quoted) string. Never evaluated as code."""
+    t = text.strip()
+    if t.lower() in ("true", "false"):
+        return t.lower() == "true"
+    if t.lower() in ("null", "none"):
+        return None
+    try:
+        return int(t)
+    except ValueError:
+        pass
+    try:
+        return float(t)
+    except ValueError:
+        return t[1:-1] if len(t) >= 2 and t[0] == t[-1] and t[0] in "'\"" else t
+
+
+def parse_filter(predicate: str) -> tuple[str, str, Any]:
+    m = _WHERE.match(predicate)
+    if not m:
+        raise DutyContractError("bad_filter", f"{predicate!r} is not `<field> <==|!=|>|>=|<|<=> <value>`")
+    return m.group("field"), m.group("op"), _scalar(m.group("value"))
+
+
+def _matches(item: Any, predicate: tuple[str, str, Any]) -> bool:
+    field_name, op, wanted = predicate
+    try:
+        got = _walk(item, field_name.split("."), field_name)
+    except DutyContractError:
+        return False  # an item without the field does not satisfy a filter on it
+    try:
+        return {"==": got == wanted, "!=": got != wanted, ">": got > wanted, ">=": got >= wanted,
+                "<": got < wanted, "<=": got <= wanted}[op]
+    except TypeError:
+        return False
+
+
 def resolve(expr: Any, intent: dict[str, str], results: dict[str, Any]) -> Any:
-    """Bind one argument: a `$...` string is a reference (`$intent.p`, `$step`, `$step.a.0.b`), anything else a literal."""
+    """Bind one argument: a `$...` string is a reference (`$intent.p`, `$step`, `$step.a.0.b`), anything else a literal.
+
+    A reference may end with ` where <field> <op> <value>`: the filter is applied to the LIST that precedes the first
+    index in the path, and the path then continues into the filtered list. `$items.0.id where available == true` is the
+    id of the first item whose `available` is true, not of the first item. A filter needs an index to pick from."""
     if isinstance(expr, str) and expr.startswith("$"):
-        head, *segments = expr[1:].split(".")
+        path, _, predicate = expr.partition(" where ")
+        head, *segments = path[1:].split(".")
         if head == "intent":
-            return _walk(intent, segments, expr)
-        if head not in results:
+            root: Any = intent
+        elif head in results:
+            root = results[head]
+        else:
             raise DutyContractError("unresolved_reference", f"{expr}: step {head!r} has not produced a result")
-        return _walk(results[head], segments, expr)
+        if not predicate:
+            return _walk(root, segments, expr)
+        index = next((i for i, seg in enumerate(segments) if seg.isdigit()), None)
+        if index is None:
+            raise DutyContractError("bad_filter", f"{expr}: a filter picks from a list, so the path needs an index (e.g. .0)")
+        listed = _walk(root, segments[:index], expr)
+        if not isinstance(listed, list):
+            raise DutyContractError("bad_filter", f"{expr}: the filter applies to a list, found {type(listed).__name__}")
+        wanted = parse_filter(predicate)
+        return _walk([item for item in listed if _matches(item, wanted)], segments[index:], expr)
     if isinstance(expr, dict):
         return {k: resolve(v, intent, results) for k, v in expr.items()}
     if isinstance(expr, list):
@@ -219,6 +276,20 @@ def parse_duty(data: dict[str, Any], path: Path | None = None) -> Duty:
                     raise DutyError(f"step {step.id}: {ref} names an undeclared parameter")
             elif head not in earlier:
                 raise DutyError(f"step {step.id}: {ref} must point at an EARLIER step")
+    for step in steps:
+        for ref in _refs(step.args) + _refs(step.guard or {}):
+            if " where " in ref:
+                try:
+                    parse_filter(ref.partition(" where ")[2])
+                except DutyContractError as exc:
+                    raise DutyError(f"step {step.id}: {exc.detail}") from exc
+    unattended = data.get("unattended", False) is True
+    rationale = data.get("unattended_rationale")
+    if unattended and not (isinstance(rationale, str) and rationale.strip()):
+        raise DutyError("unattended: true needs a non-empty unattended_rationale (why is this duty safe to run without a "
+                        "per-run approval?)")
+    if rationale is not None and not unattended:
+        raise DutyError("unattended_rationale is only meaningful with unattended: true")
     boundary = data["write_boundary"]["before"]
     if boundary not in ids:
         raise DutyError(f"write_boundary.before {boundary!r} is not a step id")
@@ -226,7 +297,8 @@ def parse_duty(data: dict[str, Any], path: Path | None = None) -> Duty:
     if success_head not in ids:
         raise DutyError(f"success.check {data['success']['check']!r} must reference a step")
     return Duty(name, data["description"], data["review"]["reviewer"], list(data["intent_patterns"]), params, steps,
-                boundary, dict(data["success"]), dict(data["example"]), path)
+                boundary, dict(data["success"]), dict(data["example"]), path, unattended,
+                rationale.strip() if unattended else None)
 
 
 def load_schema(duties_dir: Path) -> dict[str, Any]:
@@ -252,11 +324,32 @@ def load_duty_file(path: Path, duties_dir: Path | None = None) -> Duty:
     return parse_duty(data, path)
 
 
+def boundary_error(duty: Duty, kind: Any) -> str | None:
+    """The write boundary must be the FIRST write-classified step (D22). `kind(tool)` is "write", "read" or "absent" (the
+    tool is not registered: it cannot be judged here, the run-time check covers it). Returns a message naming the write
+    step AND the boundary when the duty is wrong, else None."""
+    boundary = duty.steps[duty.boundary_index]
+    first = next((s for s in duty.steps if kind(s.tool) == "write"), None)
+    if first is None:
+        if all(kind(s.tool) == "read" for s in duty.steps):
+            return (f"duty '{duty.name}': no step writes, so the write boundary '{boundary.id}' has nothing to guard; "
+                    "a duty needs a write-classified step to put a boundary before")
+        return None
+    if first.id == boundary.id:
+        return None
+    if duty.steps.index(first) < duty.boundary_index:
+        return (f"duty '{duty.name}': step '{first.id}' ({first.tool}) is write-classified but comes before the declared "
+                f"write boundary '{boundary.id}'; the boundary must be the FIRST write-classified step, otherwise a "
+                "write runs before the boundary")
+    return (f"duty '{duty.name}': the declared write boundary '{boundary.id}' ({boundary.tool}) is not write-classified; "
+            f"the boundary must be the FIRST write-classified step, which is '{first.id}' ({first.tool})")
+
+
 class DutyLibrary:
     """Every duty found in a directory. A file that does not load is recorded in `errors` and never matched: a broken
     duty must not stop the orchestrator, but it must not run either."""
 
-    def __init__(self, duties_dir: Path | None = None) -> None:
+    def __init__(self, duties_dir: Path | None = None, classify: Any = None) -> None:
         self.dir = Path(duties_dir) if duties_dir is not None else DEFAULT_DUTIES_DIR
         self.duties: dict[str, Duty] = {}
         self.errors: dict[str, str] = {}
@@ -268,20 +361,24 @@ class DutyLibrary:
             except (DutyError, OSError) as exc:
                 self.errors[path.name] = str(exc)
                 continue
+            if classify is not None and (problem := boundary_error(duty, classify)):
+                self.errors[path.name] = problem  # LOAD-TIME: a duty with a misplaced boundary never enters the library
+                continue
             self.duties[duty.name] = duty
 
     def __len__(self) -> int:
         return len(self.duties)
 
-    def candidates(self, goal: str) -> list[DutyMatch]:
-        """Every duty pattern the request fits at all, best first (ties by duty name, so the ranking is deterministic)."""
-        found = [m for duty in self.duties.values() for pattern in duty.intent_patterns
+    def candidates(self, goal: str, exclude: Any = frozenset()) -> list[DutyMatch]:
+        """Every duty pattern the request fits at all, best first (ties by duty name, so the ranking is deterministic).
+        `exclude` names duties that must not match (the orchestrator excludes those whose boundary is misplaced)."""
+        found = [m for duty in self.duties.values() if duty.name not in exclude for pattern in duty.intent_patterns
                  if (m := match_pattern(duty, pattern, goal)) is not None]
         return sorted(found, key=lambda m: (-m.confidence, m.duty.name, m.pattern))
 
-    def best_match(self, goal: str) -> tuple[DutyMatch | None, bool]:
+    def best_match(self, goal: str, exclude: Any = frozenset()) -> tuple[DutyMatch | None, bool]:
         """(the best candidate or None, ambiguous). Ambiguous = another duty is within AMBIGUITY_MARGIN of the best."""
-        ranked = self.candidates(goal)
+        ranked = self.candidates(goal, exclude)
         if not ranked:
             return None, False
         best = ranked[0]

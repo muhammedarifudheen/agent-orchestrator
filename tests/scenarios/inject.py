@@ -2,7 +2,8 @@
 
 The older `card_declined` fixture in conftest.py re-registers the tool WITHOUT its safety annotations, which would
 fail tests/test_contract.py (`test_every_tool_declares_safety_annotations`) if a test using it ran first. This helper
-swaps only the function body and puts the tool back exactly as it was (description and annotations included).
+swaps only the function body and puts the tool back exactly as it was (description, annotations and safety metadata included: the write policy, D24,
+refuses a write tool that lost its metadata).
 """
 from __future__ import annotations
 
@@ -25,10 +26,11 @@ async def failing_tool(module: Any, tool_name: str, failure: Exception):
 
     functools.update_wrapper(raiser, original_fn)  # same signature, so the same input schema is derived
     module.mcp.remove_tool(tool_name)
-    module.mcp.add_tool(raiser, name=tool_name, description=original_def.description, annotations=original_def.annotations)
+    module.mcp.add_tool(raiser, name=tool_name, description=original_def.description, annotations=original_def.annotations,
+                         meta=original_def.meta)
     try:
         yield
     finally:
         module.mcp.remove_tool(tool_name)
         module.mcp.add_tool(original_fn, name=tool_name, description=original_def.description,
-                            annotations=original_def.annotations)
+                            annotations=original_def.annotations, meta=original_def.meta)

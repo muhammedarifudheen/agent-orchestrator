@@ -83,6 +83,7 @@ class ToolRegistry:
     _tools: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
     connect_errors: dict[str, str] = field(default_factory=dict, init=False)
     _read_only: dict[str, bool | None] = field(default_factory=dict, init=False)
+    _meta: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
 
     async def __aenter__(self) -> "ToolRegistry":
         await self._stack.__aenter__()
@@ -117,6 +118,12 @@ class ToolRegistry:
         """Keep the server's own safety classification (MCP `read_only_hint`) next to the tool."""
         hint = getattr(getattr(tool, "annotations", None), "read_only_hint", None)
         self._read_only[qualified_name] = hint if isinstance(hint, bool) else None
+        self._meta[qualified_name] = dict(getattr(tool, "meta", None) or {})
+
+    def tool_meta(self, qualified_name: str) -> dict[str, Any]:
+        """The server's own safety metadata for a tool (writes, side_effect, idempotent, reversible, scope), as it
+        published it. Empty when the server published none: the write policy (D24) treats that as unclassifiable."""
+        return dict(self._meta.get(qualified_name, {}))
 
     def is_read_only(self, qualified_name: str) -> bool | None:
         """True = the tool only reads; False = it changes state or moves money; None = the server did not say

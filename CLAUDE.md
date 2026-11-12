@@ -480,14 +480,26 @@ implemented them. Change them here first, then in code.
   ask. A parameter that does not fit its pattern (a city name where an airport code belongs) means the request cannot run the duty
   at all. Two different duties within 0.03 of each other at the top are ambiguous: no duty. Never lower the number to make a request
   match; change it only by a decision recorded here.
-  (2) THE WRITE BOUNDARY. `write_boundary.before` names the FIRST write-classified step, and every step before it must be
-  read-only. "Write-classified" is the server's own MCP annotation (`read_only_hint`), now kept by the registry
-  (`ToolRegistry.is_read_only`; unknown counts as a write). It is enforced three times: at review (`tests/test_duty_library.py`),
-  at run time (a pre-boundary tool that is not read-only is refused before it runs: `write_before_boundary`), and by a WRITE
-  GATE the orchestrator consults at the boundary BEFORE the first write, with the full list of writes ahead
-  (`Orchestrator(write_gate=...)`; a False stops the run with a handoff and nothing written). The DEFAULT gate allows a reviewed
-  duty to cross its own boundary, because the named reviewer already approved this exact sequence; a caller that wants a per-run
-  approval passes its own gate. The boundary is recorded in the run (`state.write_boundary`, and in any handoff).
+  (2) THE WRITE BOUNDARY, AND WHAT IT IS NOT. write_boundary is the FIRST write-classified step, regardless of what the brief names:
+  every step before it must be read-only, and the boundary step must be the first one that writes. "Write-classified" is the
+  server's own published metadata (D24), read through the registry (`ToolRegistry.tool_meta`, `is_read_only`; unknown counts as a
+  write). It is checked at LOAD time (`agent.duties.boundary_error`: a duty whose boundary is after a write step, before a read
+  step, or that has no write step at all is unusable, and the message names the write step AND the boundary;
+  `DutyLibrary(dir, classify=...)` applies it when the library is built, and the orchestrator applies it against its own registry at
+  the start of every run, excludes an unusable duty and logs `DUTY UNUSABLE: ...`), at review (`tests/test_duty_library.py`) and at
+  run time (a pre-boundary tool that is not read-only is refused before it runs: `write_before_boundary`).
+  THE DUTY BOUNDARY IS WHERE, NOT WHETHER. It tells the orchestrator where to stop; it never permits a write. A write inside a reviewed
+  duty is subject to the same write policy as any other write (D24): it needs `allow_writes=True`, a caller-supplied approver, or the
+  duty's own `unattended: true` with a MANDATORY `unattended_rationale:` string (missing, empty or blank = the duty does not load; the
+  schema requires it and `parse_duty` re-checks it). Per-duty `unattended: true` + rationale is the ONLY bypass; no shipped duty
+  uses it, it covers only that duty (a planner-path write, or another duty's write, in the same orchestrator is still refused), and
+  the rationale is recorded in the run (`write_boundary.unattended_rationale`, `write_decisions`, the run record, and any handoff). Why
+  refuse by default: the reviewer approved the SHAPE of a duty, not the specific amount, counterparty and moment of every future
+  run; a duty can be safe in general and wrong on a given day (a sold-out flight, a frozen account, a partial refund); the boundary
+  protects the sequence, not the actual write. `Orchestrator(write_gate=...)` remains as an optional VETO hook at the boundary (a False
+  return stops the run; it can never grant a write). REVERSED: this paragraph originally let a reviewed duty cross its own boundary by
+  default; that made the boundary a substitute for a write policy that the planner path also lacked, and was replaced by D24.
+  In one line: duty boundary is where, not whether; per-duty unattended: true + rationale is the only bypass.
   (3) CONTRACT FAILURE IS NEVER SILENT. If a matched duty's contract fails while it runs (an unresolved reference, a false guard,
   an unknown tool, a pre-boundary write, a success criterion not met), the planner takes over and is told, in the request itself,
   which actions already completed and must not be repeated; and the failure is recorded in THREE places: the log
@@ -506,13 +518,15 @@ implemented them. Change them here first, then in code.
   `DOC-VALID`, rejects `DOC-REJECT`, and leaves anything else PENDING. (b) The brief put `kyc_onboarding`'s boundary before
   `open_account`, but `create_customer` is itself a write and comes first, so the boundary is before `create`: a duty that writes
   before its boundary is a safety hole. (c) `book_flight` needs a passenger name and email, so its pattern carries them
-  (`... for {passenger_name} at {passenger_email}`), not only "from X to Y on Z". (d) The brief said the orchestrator already had
-  cost accounting, partial approval and write-safety proven; it had none of them (AUDIT.md section 3a). Only the write boundary above
-  was built. (e) Adding seven tools shifted the tuned keyword stub of D19: the intent "confirm the bank customer's identity / KYC
+  (`... for {passenger_name} at {passenger_email}`), not only "from X to Y on Z". (d) The brief said the orchestrator already had cost accounting, partial approval and write-safety proven; it had
+  none of them (AUDIT.md section 3a). The write boundary was built first, for duty runs only; the general write policy followed in D24.
+  (e) Adding seven tools shifted the tuned keyword stub of D19: the intent "confirm the bank customer's identity / KYC
   status" began to pick `create_customer`; the intent was restated as "verify the bank customer's identity / KYC status ..." (the
   stub is a keyword matcher, the meaning is unchanged) and the new tool's description no longer says "identity check".
-  Known limits: `$search.0` binds the FIRST result, so a sold-out first flight fails at `book` (the grammar has no "first with
-  seats" selector); a calendar date in an example stops being bookable once past, so the shipped `book_flight` example uses `$today+60` (an
+  Known limits: `$search.0` binds the FIRST result unless the reference carries a filter: `$search.0.flight_id where
+  seats_available > 0` picks the first item that passes (grammar: ` where <field> <op> <value>`, ops `== != > >= < <=`, applied to the
+  list before the first index; nothing is evaluated as code; a filter that matches nothing is an `unresolved_reference` contract
+  failure, never a guess), and the shipped `book_flight` uses it; a calendar date in an example stops being bookable once past, so the shipped `book_flight` example uses `$today+60` (an
   example intent may contain `$today+N`, expanded by `substitute_setup`), and the scenario tests use dates relative to today;
   a duty INDUCED from identical goals still embeds the date of those runs (D23, AUDIT.md 3a C40/C42).
 - D23. Duty induction: a duty is learned from successful runs, and installed only by a person (Package 8).
@@ -545,6 +559,56 @@ implemented them. Change them here first, then in code.
   (4) WHAT IS NOT PROVEN. Induction needs no model, so it adds no opt-in skip; but it has only been run on the mock servers
   with a scripted planner. Whether a real model's runs would induce useful duties, and whether replay on a real system is safe,
   is untested (AUDIT.md section 3a).
+  (5) STALENESS (Package 8 follow-up). Induction does not embed literal dates or ids from the source runs. An ISO date token or an
+  id-like token (`ORD-ABCD1234`, `SKU-1001`) in the goals is ALWAYS a placeholder, even when it is identical in every run, so three
+  identical goals no longer give a duty that matches only that exact request on that exact day; the arguments that carry it bind to
+  `$intent.<slot>`. A LITERAL argument that is a date or an id and is neither in the goal nor in an earlier result is not embedded:
+  the group is skipped with a reason naming the step and the argument. The example intent has each date replaced by `$today+30`
+  (expanded by `substitute_setup`), so the generated contract test does not expire. An id in the example intent is kept (it is a replay
+  fixture); a duty whose example needs state the real runs created is rejected at install until a human adds `example.setup`.
+  Limits, reported not hidden: a date or id with punctuation attached in a goal (`on 2026-12-02, passenger ...`) makes the group SKIP
+  with that reason, because a pattern placeholder must be a whole word; a date embedded in a larger token (`2026-11-01T10:00`) is caught
+  by a final no-ISO-date check and skipped; induction does not generate `where` filters (a reviewer adds them), so an induced
+  `$step.0.field` still binds the first result.
+- D24. The write policy: no tool that changes the world runs unless the run may write (Package 8 follow-up; replaces "the duty
+  boundary is the only gate"). (1) METADATA, NOT NAMES. Every tool publishes `_meta` through `servers/_base.make_tool`:
+  `writes`, `side_effect` (read|write|money), `idempotent`, and for writes `reversible` (can the system itself undo one call?) and `scope`
+  (`single`: one record; `batch`: many; `external`: something outside the system, a payment gateway or a message to a person).
+  `make_tool` REFUSES TO DEFINE a write/money tool without `reversible` and `scope`. For generated servers the spec carries them
+  (`reversible`, `scope` on an operation; the generator refuses a write/money operation without them and a read operation with them).
+  The hand-written mock tools declare `reversible=False` everywhere (none has an undo the system performs by itself) and `scope=external`
+  for payments, shipments, refunds and messages. `agent/write_policy.py` reads only that metadata (a test proves the verdict follows the
+  metadata and not the tool name, and that the module names no tool); a tool whose server did not say whether it writes is a write, and a
+  write that did not declare `reversible`/`scope` is REFUSED BY NAME (`WRITE_METADATA_MISSING`, not approvable, whatever `allow_writes` is).
+  (2) DEFAULT: REFUSE. A write runs only if the run was started with `Orchestrator(allow_writes=True)`, or an `approver` returned
+  exactly True for THAT call (an approver that raises, or answers loosely, is not an approval), or it belongs to a duty that declared
+  `unattended: true` + a rationale (D22 (2)). Every tool call, on the planner path and the duty path alike, goes through one choke point
+  (`Orchestrator._call_tool`). A refusal is a PENDING-APPROVAL RECORD, never a crash and never a silent skip: the tool result the model
+  sees is `WRITE_APPROVAL_REQUIRED retryable=false recovery=human`; the rest of that turn's calls are still processed (reads run, further
+  writes are added to the record) so the record lists every write the turn proposed; then the run hands off. The record
+  (`agent/approvals.py`, `<handoff_dir>/approvals/<time>_<user>.json`, or `approvals_dir`) holds the goal, each proposed write (tool,
+  arguments, `cost_summary`: reversible, scope, side_effect, idempotent, moves_money), the reason, the steps that already ran, and the duty and
+  boundary if any. It is also in the handoff (`pending_approval`) and on the run result. The handoff JSON now always carries
+  `write_decisions` (every write the policy looked at: mode, allowed, reason, cost summary; an empty list when none), so all handoffs keep one shape.
+  (3) PARTIAL APPROVAL. `approvals.approve(path, ids, reviewer, registry)` approves SOME of the writes in a record and executes exactly those, in id
+  sequence; the others stay pending (record status `pending` -> `partial` -> `complete`); `approvals.reject` retires some. A reviewer must be
+  named. A write executes at most once: it is saved as `executing` before the call, and only a `pending` write can be decided, so a crash or a
+  repeated approval never re-runs it. A tool that has lost its metadata since the record was made is refused at execution. An `approver`
+  callable gives the same subset per call, in the run itself.
+  (4) "COST" HERE MEANS BLAST RADIUS (reversible, scope, whether it moves money), shown to the approver. It is NOT token or money accounting:
+  AUDIT.md C11 (token/usage accounting) is still not implemented.
+  (5) CHANGES TO FROZEN FILES, and why (rule: record why). `specs/schema.json` gained two OPTIONAL operation fields, `reversible` and `scope`;
+  `generators/from_spec.py` now (a) refuses a write/money operation that does not state both, after the existing review check, (b) refuses
+  them on a read operation, and (c) emits them in the `@tool(...)` decorator of a write/money operation. Why: a generated server must be able to
+  declare the same metadata as a hand-written one or the policy could never classify it; read operations emit nothing new, so every committed
+  generated server is byte-identical (`--check` is green for all five). Consequences accepted: the tests that drive a write through the
+  orchestrator now say `allow_writes=True` (a decision, not a loosening: the default is refuse); the test doubles that re-register a tool
+  (`tests/scenarios/inject.py`, the `card_declined` fixture) keep its metadata; a stub registry that has no metadata must declare its tools reads.
+  `demo.py` takes `--allow-writes`; without it the demo stops at a pending-approval record instead of booking.
+  (6) KNOWN LIMITS. Approving a record executes the stored arguments against the live registry; it does NOT resume the run and does NOT re-check
+  that the world is as it was when the write was proposed. There is no command-line front end for approvals yet (the library functions are
+  what the tests drive). A planner that proposes writes across several turns produces one record per stop. `reversible` is declared by the
+  server author and not verified.
 
 ## Architecture: genericity
 

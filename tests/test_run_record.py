@@ -28,7 +28,7 @@ def planner_script():
 
 async def test_a_successful_planner_run_is_recorded_with_what_induction_needs(tmp_path):
     async with SpyRegistry(SERVERS, pattern="travel_server.py") as reg:
-        orch = Orchestrator(reg, client=planner_script(), user_id="tester", run_log_dir=tmp_path, duties=None)
+        orch = Orchestrator(reg, allow_writes=True, client=planner_script(), user_id="tester", run_log_dir=tmp_path, duties=None)
         result = await orch.run("find flights DEL to BOM")
     assert result.success
     [path] = list(tmp_path.glob("*.json"))
@@ -42,7 +42,7 @@ async def test_a_successful_planner_run_is_recorded_with_what_induction_needs(tm
 
 async def test_a_duty_run_is_recorded_as_a_duty_run_with_its_write_classifications(tmp_path):
     async with SpyRegistry(SERVERS, pattern="travel_server.py") as reg:
-        orch = Orchestrator(reg, client=ScriptedLLM(), user_id="tester", run_log_dir=tmp_path)
+        orch = Orchestrator(reg, allow_writes=True, client=ScriptedLLM(), user_id="tester", run_log_dir=tmp_path)
         result = await orch.run(book_flight_goal())
     assert result.duty_used == "book_flight"
     record = json.loads(next(tmp_path.glob("*.json")).read_text(encoding="utf-8"))
@@ -54,7 +54,7 @@ async def test_a_duty_run_is_recorded_as_a_duty_run_with_its_write_classificatio
 async def test_a_run_that_ends_in_a_handoff_is_not_recorded(tmp_path, monkeypatch):
     monkeypatch.setenv("TRAVEL_FAIL_MODE", "all_down")
     async with SpyRegistry(SERVERS, pattern="travel_server.py") as reg:
-        orch = Orchestrator(reg, client=ScriptedLLM(), user_id="tester", run_log_dir=tmp_path / "runs",
+        orch = Orchestrator(reg, allow_writes=True, client=ScriptedLLM(), user_id="tester", run_log_dir=tmp_path / "runs",
                             handoff_dir=tmp_path / "handoffs")
         result = await orch.run(book_flight_goal())
     assert not result.success
@@ -65,12 +65,12 @@ async def test_a_run_that_ends_in_a_handoff_is_not_recorded(tmp_path, monkeypatc
 async def test_nothing_is_written_unless_a_directory_is_given(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     async with SpyRegistry(SERVERS, pattern="travel_server.py") as reg:
-        await Orchestrator(reg, client=planner_script(), user_id="tester", duties=None).run("find flights DEL to BOM")
+        await Orchestrator(reg, allow_writes=True, client=planner_script(), user_id="tester", duties=None).run("find flights DEL to BOM")
     assert list(tmp_path.iterdir()) == []
 
 
 async def test_two_runs_in_the_same_second_do_not_overwrite_each_other(tmp_path):
     for _ in range(2):
         async with SpyRegistry(SERVERS, pattern="travel_server.py") as reg:
-            await Orchestrator(reg, client=planner_script(), user_id="tester", run_log_dir=tmp_path, duties=None).run("find flights")
+            await Orchestrator(reg, allow_writes=True, client=planner_script(), user_id="tester", run_log_dir=tmp_path, duties=None).run("find flights")
     assert len(list(tmp_path.glob("*.json"))) == 2

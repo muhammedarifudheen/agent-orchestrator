@@ -47,7 +47,7 @@ async def run_scenario(tmp_path: Path, intents=None, env: dict | None = None, mo
     llm = (PlannedLLM(intents or INTENTS, SCENARIO["facts"], planner) if planner is not None
            else IntentLLM(intents or INTENTS, SCENARIO["facts"]))
     async with SpyRegistry(SERVERS) as reg:  # default pattern: every server, generated ones included
-        orch = Orchestrator(reg, client=llm, handoff_dir=tmp_path, user_id="tester")
+        orch = Orchestrator(reg, allow_writes=True, client=llm, handoff_dir=tmp_path, user_id="tester")
         result = await orch.run(SCENARIO["goal"])
         return result, llm, list(reg.calls), sorted(reg._tools)
 

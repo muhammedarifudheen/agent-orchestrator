@@ -15,7 +15,7 @@ steps:
     args: {origin: "$intent.origin", destination: "$intent.destination", date: "$intent.date"}
   - id: book
     tool: travel__book_flight
-    args: {flight_id: "$search.0.flight_id", passenger_name: "$intent.passenger_name", passenger_email: "$intent.passenger_email"}
+    args: {flight_id: "$search.0.flight_id where seats_available > 0", passenger_name: "$intent.passenger_name", passenger_email: "$intent.passenger_email"}
   - id: confirm
     tool: travel__send_confirmation
     args: {email: "$intent.passenger_email", booking_ref: "$book.booking_ref", details: "Your flight booking is confirmed."}

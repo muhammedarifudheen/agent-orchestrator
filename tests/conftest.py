@@ -33,6 +33,15 @@ def fresh_http_pool():
 @pytest.fixture
 def card_declined():
     """Monkeypatch charge_payment to raise ToolFailure(CARD_DECLINED, retryable=False, recovery="human")."""
+    import asyncio
+
+    from mcp import Client
+
+    async def listed():
+        async with Client(retail_server.mcp) as client:
+            return next(t for t in (await client.list_tools()).tools if t.name == "charge_payment")
+
+    original_def = asyncio.run(listed())  # keep its annotations AND safety metadata (D24): a write tool without them is refused
     original = retail_server.charge_payment
 
     def charge_payment(order_id: str, amount: float) -> dict:
@@ -41,10 +50,12 @@ def card_declined():
                           retryable=False, recovery="human")
 
     retail_server.mcp.remove_tool("charge_payment")
-    retail_server.mcp.add_tool(charge_payment, name="charge_payment")
+    retail_server.mcp.add_tool(charge_payment, name="charge_payment", annotations=original_def.annotations,
+                               meta=original_def.meta)
     yield
     retail_server.mcp.remove_tool("charge_payment")
-    retail_server.mcp.add_tool(original, name="charge_payment")
+    retail_server.mcp.add_tool(original, name="charge_payment", description=original_def.description,
+                               annotations=original_def.annotations, meta=original_def.meta)
 
 
 # -- slow-run capture (D17): a diagnostic, never a gate ------------------------------------------------------

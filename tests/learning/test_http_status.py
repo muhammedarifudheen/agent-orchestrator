@@ -71,7 +71,7 @@ async def test_handoff_stores_http_status_as_its_own_field(tmp_path, monkeypatch
     (servers / "httpstatus_server.py").write_text(FAKE_SERVER, encoding="utf-8")
     monkeypatch.syspath_prepend(str(servers))
     async with InMemoryRegistry(servers, pattern="httpstatus_server.py") as reg:
-        await Orchestrator(reg, client=OneCallLLM(), handoff_dir=tmp_path, user_id="tester").run("find R1")
+        await Orchestrator(reg, allow_writes=True, client=OneCallLLM(), handoff_dir=tmp_path, user_id="tester").run("find R1")
     data = json.loads(next(tmp_path.glob("*.json")).read_text(encoding="utf-8"))
     assert data["error_snapshot"]["http_status"] == 404
     assert data["error_snapshot"]["error_message"] == "upstream has no such record"

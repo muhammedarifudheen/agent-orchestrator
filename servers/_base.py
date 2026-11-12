@@ -25,35 +25,51 @@ from mcp.types import ToolAnnotations
 from errors import ToolFailure, guarded, unknown_outcome
 
 __all__ = ["ToolFailure", "guarded", "unknown_outcome", "make_tool", "check_outage", "outage_active",
-           "auth_from_env", "AuthMaterial", "standard_http_error", "SIDE_EFFECTS"]
+           "auth_from_env", "AuthMaterial", "standard_http_error", "SIDE_EFFECTS", "SCOPES"]
 
 SIDE_EFFECTS = ("read", "write", "money")
+SCOPES = ("single", "batch", "external")  # blast radius of one call: one record, many records, or outside the system
 
 
 # -- tool registration -------------------------------------------------------------------------
 
 def make_tool(mcp: MCPServer) -> Callable[..., Callable[[Callable], Callable]]:
-    """Return a ``tool(side_effect=..., idempotent=...)`` decorator bound to ``mcp``.
+    """Return a ``tool(side_effect=..., idempotent=..., reversible=..., scope=...)`` decorator bound to ``mcp``.
 
     It registers the function as an MCP tool, wraps it in ``@guarded`` with the right timeout
-    policy, and publishes the safety facts as MCP tool annotations (``read_only_hint``,
-    ``idempotent_hint``) so clients and the shared contract test can read them.
+    policy, and publishes the safety facts twice: as MCP tool annotations (``read_only_hint``,
+    ``idempotent_hint``) and as tool metadata (``_meta``: writes, side_effect, idempotent, reversible, scope),
+    which is what the orchestrator's write policy reads (CLAUDE.md D24).
 
     ``side_effect``: "read" (no effect), "write" (changes state), "money" (moves money).
     ``idempotent`` defaults to True for reads and MUST be stated for write/money tools.
+    ``reversible`` (can the system itself undo one call?) and ``scope`` ("single", "batch" or "external": the blast
+    radius of one call) MUST be stated for write/money tools and are refused on reads: a write tool whose blast
+    radius is not declared cannot be defined, and one that reaches the orchestrator without them is refused there.
     """
 
-    def tool(*, side_effect: str = "read", idempotent: bool | None = None) -> Callable[[Callable], Callable]:
+    def tool(*, side_effect: str = "read", idempotent: bool | None = None, reversible: bool | None = None,
+             scope: str | None = None) -> Callable[[Callable], Callable]:
         if side_effect not in SIDE_EFFECTS:
             raise ValueError(f"side_effect must be one of {SIDE_EFFECTS}, got {side_effect!r}")
         if idempotent is None:
             if side_effect != "read":
                 raise ValueError("write/money tools must state idempotent=True|False explicitly")
             idempotent = True
+        if side_effect == "read":
+            if reversible is not None or scope is not None:
+                raise ValueError("read tools take no reversible/scope: they change nothing")
+        elif reversible is None or scope is None:
+            missing = [n for n, v in (("reversible", reversible), ("scope", scope)) if v is None]
+            raise ValueError(f"write/money tools must state {' and '.join(missing)} (scope is one of {SCOPES})")
+        elif scope not in SCOPES:
+            raise ValueError(f"scope must be one of {SCOPES}, got {scope!r}")
         annotations = ToolAnnotations(read_only_hint=side_effect == "read", idempotent_hint=idempotent)
+        meta = {"writes": side_effect != "read", "side_effect": side_effect, "idempotent": idempotent,
+                "reversible": reversible, "scope": scope}
 
         def decorate(fn: Callable) -> Callable:
-            return mcp.tool(annotations=annotations)(guarded(fn, idempotent=idempotent))
+            return mcp.tool(annotations=annotations, meta=meta)(guarded(fn, idempotent=idempotent))
 
         return decorate
 

@@ -89,7 +89,7 @@ async def drive(tmp: Path, runs_dir: Path, variants: list[dict]) -> list:
         for v in variants:
             llm = ScriptedLLM(*plan_for(v))
             orch = Orchestrator(reg, client=llm, handoff_dir=tmp / "handoffs", user_id="tester", duties=None,
-                                run_log_dir=runs_dir)
+                                run_log_dir=runs_dir, allow_writes=True)
             results.append(await orch.run(v["goal"]))
     return results
 
@@ -199,17 +199,29 @@ def flow(tmp_path_factory, baseline):
         async def again():
             async with SpyRegistry(SERVERS, pattern="travel_server.py") as reg:
                 orch = Orchestrator(reg, client=llm, handoff_dir=work / "h2", user_id="tester",
-                                    duties=DutyLibrary(root / "duties"))
+                                    duties=DutyLibrary(root / "duties"), allow_writes=True)
                 return await orch.run(goal), list(reg.calls)
 
         second, calls = asyncio.run(again())
         bookings = [b for b in travel_server._BOOKINGS.values() if b["status"] == "CONFIRMED"]
+
+        # the same request with ANOTHER date: the induced duty is not stale, it serves it too (no model)
+        reset_worlds()
+        llm3 = ScriptedLLM()
+
+        async def another_date():
+            async with SpyRegistry(SERVERS, pattern="travel_server.py") as reg:
+                orch = Orchestrator(reg, client=llm3, handoff_dir=work / "h3", user_id="tester",
+                                    duties=DutyLibrary(root / "duties"), allow_writes=True)
+                return await orch.run(goal_for(on=future(45)))
+
+        third = asyncio.run(another_date())
     finally:
         reset_worlds()
     return NS(work=work, runs=runs, proposals=proposals, layout=layout, root=root, name=name, goal=goal, results=results,
               outcomes=outcomes, before=before, after=after, installed_before=installed_before, proposed_text=proposed_text,
               files_pending=files_pending, pending=pending, applied=applied, commits_before=commits_before, commits_after=commits_after,
-              second=second, llm=llm, calls=calls, bookings=bookings)
+              second=second, llm=llm, calls=calls, bookings=bookings, third=third, llm3=llm3)
 
 
 # (a) ---------------------------------------------------------------------------------------------------------------------
@@ -291,6 +303,9 @@ def test_the_next_identical_intent_is_served_by_the_installed_duty_without_askin
     assert flow.llm.calls == 0, "the model was consulted although the installed duty matched"
     assert flow.calls == ["travel__search_flights", "travel__book_flight", "travel__send_confirmation"]
     assert len(flow.bookings) == 1 and flow.bookings[0]["passenger_email"] == "asha@example.com"
+    # the duty is not tied to the runs' date: a request for another date is served by it too, still without the model
+    assert flow.third.success and flow.third.duty_used == flow.name, flow.third.final_message
+    assert flow.llm3.calls == 0
 
 
 # -- synthetic run records -----------------------------------------------------------------------------------------------
@@ -399,7 +414,8 @@ def test_variation_in_city_date_name_and_email_becomes_placeholders_and_the_duty
                                     "passenger_email": "$intent.passenger_email"}
     assert steps["send_confirmation"] == {"email": "$intent.passenger_email", "booking_ref": "$book_flight.booking_ref",
                                           "details": "Your flight booking is confirmed."}
-    assert data["example"] == {"intent": goal_for(*cases[0]), "expect": "success"}
+    # CHANGED (was the literal-date behaviour): the example's date is now `$today+30`, never the first run's calendar date
+    assert data["example"] == {"intent": goal_for(*cases[0]).replace("2031-01-10", "$today+30"), "expect": "success"}
     lib = tmp_library(world, out.name)
     fourth = goal_for("CCU", "PNQ", "2031-04-13", "Oleg Tanaka Brown", "oleg@x.test")  # not in any run
     match, _ = lib.best_match(fourth)
@@ -418,9 +434,96 @@ def tmp_library(world, name: str) -> DutyLibrary:
     return library
 
 
+ISO = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def proposal_texts(world, name: str) -> dict[str, str]:
+    folder = world.proposals / "duties"
+    return {s: (folder / f"{name}{s}").read_text(encoding="utf-8") for s in PROPOSAL_SUFFIXES}
+
+
+def test_dates_that_differ_per_run_leave_no_date_in_the_duty_its_diff_or_its_test(world):
+    """THE OWNER'S TEST: induction must not embed literal dates or ids from the source runs."""
+    dates = ["2026-11-01", "2026-11-02", "2026-11-03"]
+    for i, on in enumerate(dates):
+        write_run(world.runs, i, goal_for(on=on), flight_ops(on=on, ref=f"BK-{i}"))
+    [out] = proposed(induce(world.runs, world.proposals, world.duties))
+    texts = proposal_texts(world, out.name)
+    for suffix in (".duty.yaml", ".duty.diff", ".contract_test.py"):
+        assert not ISO.search(texts[suffix]), f"{suffix} holds a date"
+        assert not any(d in texts[suffix] for d in dates)
+    data = yaml.safe_load(texts[".duty.yaml"])
+    assert "on {date} and email" in data["intent_patterns"][0] and "date" in data["parameters"]
+    steps = {s["id"]: s["args"] for s in data["steps"]}
+    assert steps["search_flights"]["date"] == "$intent.date"
+    assert data["example"]["intent"] == goal_for(on="$today+30")
+    assert "example_note" in json.loads(texts[".evidence.json"])
+    fourth = goal_for(on="2027-05-09")  # a date none of the runs used
+    match, _ = tmp_library(world, out.name).best_match(fourth)
+    assert match.duty.name == out.name and match.confidence == 1.0 and match.captures["date"] == "2027-05-09"
+
+
+def test_three_identical_runs_still_make_the_date_a_placeholder_and_the_example_uses_today_plus(world):
+    three_identical(world.runs)  # the SAME date in every run
+    [out] = proposed(induce(world.runs, world.proposals, world.duties))
+    texts = proposal_texts(world, out.name)
+    for suffix in (".duty.yaml", ".duty.diff", ".contract_test.py"):
+        assert not ISO.search(texts[suffix]) and "2031-01-10" not in texts[suffix]
+    data = yaml.safe_load(texts[".duty.yaml"])
+    assert "{date}" in data["intent_patterns"][0] and data["steps"][0]["args"]["date"] == "$intent.date"
+    assert data["example"]["intent"] == goal_for(on="$today+30")
+    assert "2031-01-10" in json.loads(texts[".evidence.json"])["goals"][0], "the evidence may keep the raw goals"
+    match, _ = tmp_library(world, out.name).best_match(goal_for(on="2032-02-02"))
+    assert match.confidence == 1.0
+
+
+def test_an_id_like_token_identical_in_every_goal_becomes_a_placeholder(world):
+    for i in range(3):
+        write_run(world.runs, i, goal_for(on="2031-01-10") + " quoting ORD-ABCD1234",
+                  flight_ops(ref=f"BK-{i}", details="ORD-ABCD1234"))
+    [out] = proposed(induce(world.runs, world.proposals, world.duties))
+    texts = proposal_texts(world, out.name)
+    data = yaml.safe_load(texts[".duty.yaml"])
+    assert "quoting {details}" in data["intent_patterns"][0] and "ORD-ABCD1234" not in data["intent_patterns"][0]
+    assert {s["id"]: s["args"] for s in data["steps"]}["send_confirmation"]["details"] == "$intent.details"
+    assert data["example"]["intent"].endswith("quoting ORD-ABCD1234"), "an id keeps the first run's value (a replay fixture)"
+    assert "ORD-ABCD1234" not in data["steps"][2]["args"].values()
+    match, _ = tmp_library(world, out.name).best_match(goal_for(on="2031-05-05") + " quoting ORD-ZZZZ9999")
+    assert match.confidence == 1.0 and match.captures["details"] == "ORD-ZZZZ9999"
+
+
+@pytest.mark.parametrize("literal", ["2031-05-05", "SKU-1001", "ORD-ABCD1234"])
+def test_a_date_or_id_literal_argument_from_nowhere_skips_the_group_naming_step_and_argument(world, literal):
+    for i in range(3):
+        write_run(world.runs, i, goal_for(on="2031-01-10"), flight_ops(ref=f"BK-{i}", details=literal))
+    [out] = induce(world.runs, world.proposals, world.duties)
+    assert out.status == "skipped" and proposal_files(world) == []
+    assert "send_confirmation" in out.reason and "'details'" in out.reason and "date/id" in out.reason
+    assert "cannot be generalised" in out.reason
+
+
+def test_an_ordinary_constant_such_as_a_currency_is_still_a_literal(world):
+    for i in range(3):
+        write_run(world.runs, i, goal_for(on="2031-01-10"), flight_ops(ref=f"BK-{i}", details="INR"))
+    [out] = proposed(induce(world.runs, world.proposals, world.duties))
+    data = yaml.safe_load((world.proposals / "duties" / f"{out.name}.duty.yaml").read_text(encoding="utf-8"))
+    assert {s["id"]: s["args"] for s in data["steps"]}["send_confirmation"]["details"] == "INR"
+
+
+def test_a_goal_without_dates_or_ids_still_gives_a_literal_pattern(world):
+    for i in range(3):
+        ops = flight_ops(ref=f"BK-{i}")[1:]
+        ops[0]["arguments"]["flight_id"] = "FLIGHT9"  # an ordinary constant (no dash: not id-like)
+        write_run(world.runs, i, "reserve seats on the morning service", ops)
+    [out] = proposed(induce(world.runs, world.proposals, world.duties))
+    data = yaml.safe_load((world.proposals / "duties" / f"{out.name}.duty.yaml").read_text(encoding="utf-8"))
+    assert data["intent_patterns"] == ["reserve seats on the morning service"] and data["example"]["intent"] == data["intent_patterns"][0]
+
+
 def test_a_multi_word_placeholder_is_bound_by_string_comparison_in_every_run(world):
     for i, name in enumerate(["Asha Verma", "Ravi Kumar Singh", "Meera Iyer"]):
-        write_run(world.runs, i, goal_for(name=name), flight_ops(name=name, ref=f"BK-{i}"))
+        # CHANGED: the goal's date must be the date the tool args carry (it used to be an unrelated literal the pattern absorbed)
+        write_run(world.runs, i, goal_for(name=name, on="2031-01-10"), flight_ops(name=name, ref=f"BK-{i}"))
     [out] = proposed(induce(world.runs, world.proposals, world.duties))
     text = (world.proposals / "duties" / f"{out.name}.duty.yaml").read_text(encoding="utf-8")
     assert "{passenger_name}" in text and "passenger_name: $intent.passenger_name" in text
@@ -488,7 +591,9 @@ def test_a_name_that_collides_with_a_duty_or_a_proposal_gets_a_numeric_suffix(wo
     [first] = proposed(induce(world.runs, world.proposals, world.duties))
     assert first.name == "book_flight_2"  # duties/book_flight.yaml exists
     for i in range(3):  # another sequence ending in the same write tool: a different group, same bare name
-        write_run(world.runs, 10 + i, "reserve seats on the morning service", flight_ops(ref=f"BK-9{i}")[1:])
+        ops = flight_ops(ref=f"BK-9{i}")[1:]
+        ops[0]["arguments"]["flight_id"] = "FLIGHT9"  # CHANGED: a literal id/date-like flight id is now (rightly) a skip
+        write_run(world.runs, 10 + i, "reserve seats on the morning service", ops)
     [second] = proposed(induce(world.runs, world.proposals, world.duties))
     assert second.name == "book_flight_3"
 
