@@ -609,6 +609,37 @@ implemented them. Change them here first, then in code.
   that the world is as it was when the write was proposed. There is no command-line front end for approvals yet (the library functions are
   what the tests drive). A planner that proposes writes across several turns produces one record per stop. `reversible` is declared by the
   server author and not verified.
+- D25. The live-judgment harness (Package 9). Three judgment gaps stay open because no ANTHROPIC_API_KEY exists on this machine and nothing has
+  run against a real upstream: the real ClaudePlanner (AUDIT C24), real doc extraction (C25) and the learning loop against a real upstream failure
+  (C27). `scripts/live_judgment.py` is the harness that closes them the moment the precondition exists, and fails honestly until then.
+  (1) NO LOOSER LIVE TEST. `--planner` and `--doc` run the EXISTING contract tests (`tests/scenarios/test_planner_contract.py` and
+  `test_cross_industry_planners.py` with the `claude` parametrizations: 6 tests; `tests/ingest/test_doc_contract.py` with `http`: 1 test) in a pytest
+  subprocess whose environment only adds `LIVE_TESTS=1`, which unlocks their existing skipif gates. The harness contains no `def check_*` and no
+  `assert` (a test checks that by AST), defines none of the contract function names, and reads its verdict from the junit XML. A test proves the
+  same ids are collected and run with the variables set and are SKIPPED without them, so the harness changes the environment and nothing else.
+  `--doc` additionally runs the production `pipeline.process` on `tests/ingest/fixtures/dogceo.doc.md` with the real `HttpDocExtractionClient` in a
+  throwaway project copy; a model that flags operations for review is a `fail` (blocked at the review gate), not a pass. `--apply URL` runs the real
+  loop in a throwaway git copy against a URL that fails with an HTTP status the generated spec does not declare: generate a one-operation spec,
+  run the real Orchestrator twice (a scripted stand-in for the MODEL only), `learning.collect`, `learning.propose`, an APPROVAL THAT THE HARNESS
+  SIMULATES (stated in its output; the human gate is tested elsewhere), `learning.apply` with the real staged and promoted verification, then
+  check the status, the regenerated server, the shared contract test, one new commit and a fresh call that fails with the newly declared code.
+  (2) FAIL HONESTLY. Preconditions are checked before any work or network. Exit codes: 0 pass or a dry run; 1 fail; 2 key absent (prints exactly
+  `ANTHROPIC_API_KEY absent; to close this gap, set the key and re-run`; an ANTHROPIC_AUTH_TOKEN alone is still "absent" and the output says it is no
+  longer supported, D16); 3 upstream missing (no URL, unreachable, or loopback/private without `--allow-loopback`: not a real upstream); 4 upstream
+  healthy (a status below 400: nothing to learn); 64 usage error (argparse's own code 2 never leaks). A skipped run is recorded `skipped` and NEVER
+  prints or records a pass; the verdict PASS is printed only after real tests ran, none failed and none were skipped (`classify_junit`).
+  (3) THE RECORD. Every non-dry run appends one JSON line to `.perf/live_judgment.jsonl` (git-ignored; override with `LIVE_JUDGMENT_LOG`): date,
+  subcommand, key_present, result (pass|fail|skipped), reason, exit_code, real, artifact_path, tests, upstream. `real` is true only for the production
+  endpoint with a key, or a public upstream; a loopback run is `real: false` and can never close a gap (its offline pass is what proves the harness's
+  pass path). Only a `pass` with `real: true` may move C24, C25 or C27 from AUDIT section 3a to section 2, and a person makes that edit (AUDIT
+  section 5 says how). Nothing was moved in this package.
+  (4) `--dry-run` prints the plan without a key and without network: the exact pytest command, the exact node ids, the verbatim source of the assertion
+  functions the tests execute, and (planner, doc) the request that would be sent through the production client with the key redacted (`wire_probe`).
+  It writes no record.
+  (5) NOT ADDED, on purpose: no `ANTHROPIC_BASE_URL` or any other option in `ingest/` or `agent/` (the production endpoint is the only endpoint),
+  and no budget change. KNOWN LIMITS: the throwaway project is isolated for what it writes but `pipeline._verify` still runs with the real repo as its
+  working directory and uses the real `tests/test_contract.py`; the apply loop's approval is simulated; a wrong key records `real: true` and `fail`;
+  the harness has never run against a real key or a real upstream.
 
 ## Architecture: genericity
 
