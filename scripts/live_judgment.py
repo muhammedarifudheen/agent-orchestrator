@@ -16,6 +16,12 @@ not, and appends one line per attempt to .perf/live_judgment.jsonl.
   --dry-run                                          print the plan (preconditions, exact commands, the exact test ids and
                                                      the SOURCE of the assertions they execute, the wire request with the key
                                                      redacted); runs nothing, no network, writes no record
+  python scripts/live_judgment.py --live-apis --allow-live
+                                                     OPT-IN: the 14 live-API tests of the five real-API servers (weather,
+                                                     jsonplaceholder, catfact, dogceo, zippopotamus). Sends real requests to
+                                                     five third-party APIs. A third-party OUTAGE is recorded `skipped`
+                                                     (exit 6), never `fail`; C26 closes only if all 14 pass and all five hosts
+                                                     are attested real
   --allow-loopback                                   let a loopback/private upstream be used (tests); the record has real=false
   --allow-live                                       REQUIRED by --apply for a public upstream: the explicit confirmation that
                                                      real requests go to a third party (never a default)
@@ -35,7 +41,8 @@ Exit codes
   2  ANTHROPIC_API_KEY absent (planner, doc): nothing was run, recorded as skipped
   3  upstream missing (apply): no URL, not reachable, or not a real upstream: nothing was run, recorded as skipped
   4  upstream healthy (apply): it answered with a status < 400, so there is nothing to learn from: recorded as skipped
-  5  live not allowed (apply against a public upstream without --allow-live): nothing was run, recorded as skipped
+  5  live not allowed (apply or live-apis without --allow-live): nothing was run, recorded as skipped
+  6  third-party unavailable (live-apis): a host did not answer, so its tests could not run: recorded as skipped, not as a failure
   64 usage error (argparse's own exit code 2 is never used: 2 means "key missing")
 
 THIS SCRIPT NEVER EDITS A TRACKED FILE. It writes under .perf/ (git-ignored; or beside LIVE_JUDGMENT_LOG when that is set)
@@ -70,10 +77,11 @@ EXIT_KEY_MISSING = 2
 EXIT_UPSTREAM_MISSING = 3
 EXIT_UPSTREAM_HEALTHY = 4
 EXIT_LIVE_NOT_ALLOWED = 5
+EXIT_THIRD_PARTY_UNAVAILABLE = 6
 EXIT_USAGE = 64
 
 KEY_MISSING_MESSAGE = "ANTHROPIC_API_KEY absent; to close this gap, set the key and re-run"
-SUBCOMMANDS = ("planner", "doc", "apply")
+SUBCOMMANDS = ("planner", "doc", "apply", "live_apis")
 ANTHROPIC_HOST = "api.anthropic.com"  # the production endpoint; `real` for planner/doc means requests to it were attested
 
 # The EXISTING live-gated tests. Entries with the same `select` run in one pytest invocation. These are selections of
@@ -87,12 +95,20 @@ LIVE_TESTS: dict[str, list[dict[str, str]]] = {
         {"file": "tests/ingest/test_doc_contract.py", "select": "http"},
     ],
     "apply": [],  # no existing test needs a real upstream; the loop's own end-to-end steps are reported by this script
+    # the 14 live-API tests of the five real-API servers (CLAUDE.md D28); they have no other gate than LIVE_TESTS=1
+    "live_apis": [{"file": f, "select": "test_live"} for f in (
+        "tests/test_weather.py", "tests/test_jsonplaceholder.py", "tests/test_catfact.py", "tests/test_dogceo.py",
+        "tests/test_zippopotamus.py")],
 }
+LIVE_API_SYSTEMS = {"tests/test_weather.py": "weather", "tests/test_jsonplaceholder.py": "jsonplaceholder",
+                    "tests/test_catfact.py": "catfact", "tests/test_dogceo.py": "dogceo",
+                    "tests/test_zippopotamus.py": "zippopotamus"}
 
 CLOSES = {
     "planner": "AUDIT.md section 3a row C24 (real-model ClaudePlanner judgment)",
     "doc": "AUDIT.md section 3a row C25 (real doc extraction against a live model)",
     "apply": "AUDIT.md section 3a row C27 (the learning loop, apply included, against a REAL upstream failure)",
+    "live_apis": "AUDIT.md section 3a row C26 (live-API behaviour of the five real-API servers; opt-in, D28)",
 }
 STEP_TIMEOUT_S = 240          # every step is under 4 minutes; a timeout is a `fail` with the reason
 PROBE_TIMEOUT_S = 10
@@ -120,6 +136,8 @@ class _Ctx:
         self.allow_live = False
         self.mock = False  # OFFLINE PROOF: canned replies; the record can then never be real
         self.attest_file: Path | None = None  # where this run's attestation is written (scripts/live_attest.py)
+        self.manifest: dict[str, Any] | None = None  # the code under test at the START of the run (scripts/repo_hash.py)
+        self.stamp = ""
 
     def out(self, text: str = "") -> None:
         try:
@@ -561,16 +579,35 @@ def _record(ctx: _Ctx, sub: str, result: str, reason: str, code: int, *, real: b
             tests: list[str] | None = None, upstream: str | None = None, attestation: dict[str, Any] | None = None) -> int:
     """Append the run's record and print its hash. `real` is forced false in mock mode: whatever the caller computed, a run
     that used the offline mock can never be a real result (D26)."""
+    code_fields: dict[str, Any] = {}
+    if ctx.manifest is not None and result in ("pass", "fail"):
+        _ensure_paths()
+        import repo_hash
+
+        now_manifest = repo_hash.for_subcommand(sub)
+        if result == "pass" and repo_hash.digest(now_manifest) != repo_hash.digest(ctx.manifest):
+            changed = repo_hash.compare(ctx.manifest, now_manifest)
+            reason = ("CODE CHANGED DURING THE RUN: " + "; ".join(f"{k}: {', '.join(v)}" for k, v in changed.items() if v)
+                      + ". A run that passed while the code under test was being edited attests nothing.")
+            ctx.out(reason)
+            result, code, real = "fail", EXIT_FAIL, False
+        sidecar = _run_dir(ctx) / f"{ctx.stamp}_{sub}.manifest.json"
+        code_fields = {"repo_hash": repo_hash.digest(ctx.manifest), "repo_manifest_path": str(sidecar),
+                       "repo_manifest_sha256": repo_hash.write_sidecar(sidecar, ctx.manifest)}
     line = append_record(log_path(ctx.env), {
         "date": _now().isoformat(), "subcommand": sub, "key_present": bool(ctx.key), "result": result,
         "reason": _redact(reason, ctx.env), "exit_code": code, "real": bool(real) and not ctx.mock, "mock": ctx.mock,
         "allow_live": ctx.allow_live, "artifact_path": artifact, "artifact_sha256": _sha256_file(artifact),
-        "attestation": attestation, "tests": tests or [], "upstream": upstream})
+        "attestation": attestation, "tests": tests or [], "upstream": upstream, **code_fields})
     ctx.out(f"RECORD_HASH: {record_hash(line)}")
     return code
 
 
 def _attest_start(ctx: _Ctx, sub: str, stamp: str) -> None:
+    _ensure_paths()
+    import repo_hash
+
+    ctx.stamp, ctx.manifest = stamp, repo_hash.for_subcommand(sub)  # the code this run attests: hashed BEFORE any test runs
     ctx.attest_file = _run_dir(ctx) / f"{stamp}_{sub}.attest.jsonl"
     ctx.attest_file.parent.mkdir(parents=True, exist_ok=True)
     ctx.attest_file.write_text("", encoding="utf-8")
@@ -1069,9 +1106,117 @@ def _cmd_apply(ctx: _Ctx, url: str | None, allow_loopback: bool) -> int:
     return _record(ctx, "apply", "pass", summary, EXIT_PASS, real=is_real, artifact=str(transcript), upstream=url, attestation=att)
 
 
+# -- live apis (opt-in, D28) -------------------------------------------------------------------------------------------------------------
+
+def _live_api_hosts() -> dict[str, str]:
+    """test file -> the host its spec talks to (the spec's base_url, which the live test uses)."""
+    import yaml
+
+    out = {}
+    for test_file, system in LIVE_API_SYSTEMS.items():
+        spec = yaml.safe_load((ROOT / "specs" / f"{system}.yaml").read_text(encoding="utf-8"))
+        out[test_file] = urlsplit(spec["base_url"]).hostname or ""
+    return out
+
+
+def _failed_test_files(xml_path: Path) -> set[str]:
+    """The live-API test files that have a failed or errored testcase in a junit report (matched by module path)."""
+    out: set[str] = set()
+    for case in ET.fromstring(xml_path.read_text(encoding="utf-8")).iter("testcase"):
+        if case.find("failure") is None and case.find("error") is None:
+            continue
+        classname = case.get("classname", "")
+        out.update(f for f in LIVE_API_SYSTEMS if classname == f[:-3].replace("/", ".") or classname.startswith(f[:-3].replace("/", ".") + "."))
+    return out
+
+
+def _unavailable_hosts(att_file: Path | None, hosts: set[str]) -> set[str]:
+    """Hosts that did not ANSWER properly: a request that never got a status (connection error, timeout) or a 5xx."""
+    _ensure_paths()
+    import live_attest
+
+    bad: set[str] = set()
+    for entry in live_attest.read(att_file):
+        if entry.get("host") in hosts and (entry.get("status") is None or entry["status"] >= 500):
+            bad.add(entry["host"])
+    return bad
+
+
+def _cmd_live_apis(ctx: _Ctx) -> int:
+    by_file = _live_api_hosts()
+    hosts = sorted(set(by_file.values()))
+    if not ctx.allow_live:
+        reason = (f"this run would send real requests to {len(hosts)} third-party APIs ({', '.join(hosts)}); --allow-live is the "
+                  "explicit confirmation, and it is never a default")
+        ctx.out(f"LIVE_NOT_ALLOWED: {reason}")
+        ctx.out("  needs   : --allow-live")
+        ctx.out("  re-run  : python scripts/live_judgment.py --live-apis --allow-live")
+        ctx.out(f"  closes  : {CLOSES['live_apis']}")
+        ctx.out("SKIPPED: nothing was run, and a skip is not a pass.")
+        return _record(ctx, "live_apis", "skipped", f"LIVE_NOT_ALLOWED: {reason}", EXIT_LIVE_NOT_ALLOWED, real=False)
+    stamp = _now().strftime("%Y%m%dT%H%M%SZ")
+    _attest_start(ctx, "live_apis", stamp)
+    _ensure_paths()
+    import live_attest
+
+    ctx.out(f"Running the EXISTING live-API tests (test_live in the five real-API servers' test files) against {len(hosts)} "
+            f"third-party hosts: {', '.join(hosts)}.")
+    verdict, reason, ids, artifacts = _run_contract_tests(ctx, "live_apis", stamp)
+    per_host = {h: live_attest.summarize(ctx.attest_file, h) for h in hosts}
+    att = {"hosts": per_host, "real": all(a["real"] for a in per_host.values()),
+           "real_requests": sum(a["real_requests"] for a in per_host.values()),
+           "non_real_requests": sum(a["non_real_requests"] for a in per_host.values()), "host": ", ".join(hosts)}
+    if verdict == "pass":
+        real = _is_real(ctx, att, verdict)
+        ctx.out(f"PASS (live third-party APIs): {len(ids)} live-API tests passed against {len(hosts)} hosts")
+        ctx.out(f"  attestation: {att['real_requests']} answered request(s) over the real transport, "
+                f"{att['non_real_requests']} over another transport; every one of the {len(hosts)} hosts attested real={att['real']}")
+        return _record(ctx, "live_apis", "pass", reason, EXIT_PASS, real=real, artifact=artifacts[0], tests=ids, attestation=att)
+    failing_hosts = {by_file[f] for f in _failed_test_files(Path(artifacts[0])) if f in by_file}
+    down = _unavailable_hosts(ctx.attest_file, set(hosts))
+    if verdict == "fail" and failing_hosts and failing_hosts <= down:
+        why = (f"{', '.join(sorted(failing_hosts))} did not answer (a connection error or an HTTP 5xx), so their live-API tests "
+               f"could not run. {reason}")
+        ctx.out(f"THIRD_PARTY_UNAVAILABLE: {why}")
+        ctx.out("  AUDIT.md row C26 stays in section 3a. A third-party outage is not a failure of this code, so nothing is marked "
+                "failed; re-run later.")
+        ctx.out("SKIPPED: not a pass, and not a failure.")
+        return _record(ctx, "live_apis", "skipped", f"THIRD_PARTY_UNAVAILABLE: {why}", EXIT_THIRD_PARTY_UNAVAILABLE, real=False,
+                       artifact=artifacts[0], tests=ids, attestation=att)
+    ctx.out(f"FAIL (live third-party APIs): {reason}")
+    return _record(ctx, "live_apis", "fail", reason, EXIT_FAIL, real=_is_real(ctx, att, "fail"), artifact=artifacts[0], tests=ids,
+                   attestation=att)
+
+
 # -- dry run -----------------------------------------------------------------------------------------------------------
 
+def _dry_run_live_apis(ctx: _Ctx) -> int:
+    ctx.out("DRY RUN: nothing will be executed")
+    ctx.out("PLAN for --live-apis")
+    ctx.out("preconditions (shown, NOT enforced in a dry run):")
+    ctx.out(f"  --allow-live: {'given' if ctx.allow_live else 'ABSENT (a real run would stop with LIVE_NOT_ALLOWED, exit 5)'}")
+    hosts = _live_api_hosts()
+    ctx.out(f"  it would send real requests to {len(set(hosts.values()))} third-party hosts: {', '.join(sorted(set(hosts.values())))}")
+    ctx.out("commands a real run executes (cwd = the repo, child env LIVE_TESTS=1):")
+    all_ids: list[str] = []
+    for n, (select, files) in enumerate(_groups("live_apis"), 1):
+        xml = ".perf/live_judgment/<UTC timestamp>_live_apis.xml"
+        ctx.out("  LIVE_TESTS=1 " + _shown(["python", *_pytest_cmd(files, select, None)[1:], f"--junitxml={xml}"]))
+        ids, problem = _collect(files, select, ctx.env)
+        ctx.out(f"  (collect-only for this selection: {problem or str(len(ids)) + ' node id(s)'})")
+        all_ids += ids
+    ctx.out(f"pytest node ids that would run ({len(all_ids)}):")
+    for nid in all_ids:
+        ctx.out(f"  {nid}")
+    ctx.out("outcomes: all pass and every host attested real -> pass (closes C26); a host that does not answer (connection error or "
+            "HTTP 5xx) -> skipped, exit 6, THIRD_PARTY_UNAVAILABLE, nothing marked failed; any other failing test -> fail")
+    ctx.out("a dry run writes no record and makes no network request.")
+    return EXIT_PASS
+
+
 def _dry_run(ctx: _Ctx, sub: str, url: str | None, allow_loopback: bool) -> int:
+    if sub == "live_apis":
+        return _dry_run_live_apis(ctx)
     ctx.out("DRY RUN: nothing will be executed")
     ctx.out(f"PLAN for --{sub}")
     ctx.out("preconditions (shown, NOT enforced in a dry run):")
@@ -1137,6 +1282,8 @@ def _parser() -> _Parser:
     ap.add_argument("--doc", action="store_true", help="the existing doc contract test, then the real pipeline on dogceo.doc.md")
     ap.add_argument("--apply", nargs="?", const="", default=None, metavar="URL",
                     help="the learning loop against URL (an endpoint failing with an undeclared HTTP status)")
+    ap.add_argument("--live-apis", action="store_true", dest="live_apis",
+                    help="OPT-IN: the 14 live-API tests of the five real-API servers (needs --allow-live; third-party outages are skipped, not failed)")
     ap.add_argument("--dry-run", action="store_true", help="print the plan; run nothing, record nothing")
     ap.add_argument("--allow-loopback", action="store_true", help="allow a loopback/private upstream (tests; real=false)")
     ap.add_argument("--allow-live", action="store_true",
@@ -1151,13 +1298,15 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None, st
     ctx = _Ctx(os.environ if env is None else env, stdout or sys.stdout, stderr or sys.stderr)
     try:
         args = _parser().parse_args(argv)
-        chosen = [name for name, on in (("planner", args.planner), ("doc", args.doc), ("apply", args.apply is not None)) if on]
+        chosen = [name for name, on in (("planner", args.planner), ("doc", args.doc), ("apply", args.apply is not None),
+                                        ("live_apis", args.live_apis)) if on]
         if len(chosen) != 1:
-            raise _UsageError("give exactly one of --planner, --doc, --apply [URL]" + (f" (got {len(chosen)})" if chosen else ""))
-        if args.mock_transport and chosen[0] == "apply":
+            raise _UsageError("give exactly one of --planner, --doc, --apply [URL], --live-apis"
+                              + (f" (got {len(chosen)})" if chosen else ""))
+        if args.mock_transport and chosen[0] in ("apply", "live_apis"):
             raise _UsageError("--mock-transport applies to --planner and --doc only")
-        if args.allow_live and chosen[0] != "apply":
-            raise _UsageError("--allow-live applies to --apply only")
+        if args.allow_live and chosen[0] not in ("apply", "live_apis"):
+            raise _UsageError("--allow-live applies to --apply and --live-apis only")
     except _UsageError as exc:
         ctx.stderr.write(f"usage error: {exc}\n")
         return EXIT_USAGE
@@ -1172,6 +1321,8 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None, st
         return _cmd_planner(ctx)
     if sub == "doc":
         return _cmd_doc(ctx)
+    if sub == "live_apis":
+        return _cmd_live_apis(ctx)
     return _cmd_apply(ctx, url, args.allow_loopback)
 
 

@@ -18,11 +18,11 @@ _spec.loader.exec_module(cer)
 
 KEY = "sk-ant-FAKEKEY-9f8e7d6c5b4a-do-not-leak"
 URL = "https://httpbin.org/status/418"
-HASHES = {"--planner": "a" * 64, "--doc": "b" * 64, "--apply": "c" * 64}
+HASHES = {"--planner": "a" * 64, "--doc": "b" * 64, "--apply": "c" * 64, "--live-apis": "d" * 64}
 
 
 def _flag(argv):
-    for f in ("--planner", "--doc", "--apply"):
+    for f in ("--planner", "--doc", "--apply", "--live-apis"):
         if f in argv:
             return f
     return None
@@ -396,3 +396,132 @@ def test_default_transcript_dir_is_perf_ceremony():
     out = io.StringIO()
     cer.main(["--dry-run"], env={}, stdout=out, stderr=io.StringIO(), runner=Fake())
     assert str(ROOT / ".perf" / "ceremony") in out.getvalue()
+
+
+# -- D28: the opt-in live-API step ---------------------------------------------------------------------------------------------------------
+
+LIVE_WITH_APIS = [*LIVE, "--include-live-apis"]
+
+
+@pytest.fixture
+def network_counter(monkeypatch):
+    """Count every attempt to touch the network (sockets, DNS, httpx) and refuse it: a test that expects zero asserts on this."""
+    import socket
+
+    import httpx
+    calls = []
+
+    def boom(name):
+        def f(*a, **k):
+            calls.append(name)
+            raise AssertionError(f"a network call was attempted: {name}")
+        return f
+
+    for name in ("connect", "connect_ex"):
+        monkeypatch.setattr(socket.socket, name, boom("socket." + name))
+    monkeypatch.setattr(socket, "getaddrinfo", boom("getaddrinfo"))
+    monkeypatch.setattr(socket, "create_connection", boom("create_connection"))
+    monkeypatch.setattr(httpx.Client, "send", boom("httpx.Client.send"))
+    return calls
+
+
+def test_the_default_ceremony_is_three_steps_and_makes_zero_third_party_requests(tmp_path, network_counter):
+    fake = Fake()
+    got, out, _ = run(LIVE, GOODENV, fake, tmp_path)
+    assert got == 0 and network_counter == [], f"the default ceremony touched the network: {network_counter}"
+    cmds = [c for c, _ in fake.calls]
+    assert not any("--live-apis" in c for c in cmds), "the live-API step must not run without --include-live-apis"
+    assert [Path(c[1]).name for c in cmds if c[0] != "git"] == ["live_judgment.py"] * 3 + ["move_audit_row.py"] * 3
+    assert not any("C26" in c for c in cmds)
+    (t,) = transcripts(tmp_path)
+    doc = json.loads(t.read_text(encoding="utf-8"))
+    assert [s["name"] for s in doc["steps"]] == ["planner", "doc", "apply"] and "live_apis" not in doc
+
+
+def test_the_default_dry_run_shows_three_steps_and_says_step_4_is_opt_in(tmp_path):
+    got, out, _ = run(["--dry-run", *LIVE], GOODENV, Fake(), tmp_path)
+    assert got == 0 and "STEP 3 (apply)" in out and "STEP 4" not in out and "C26" not in out
+    assert "Step 4 (the live-API tests) is OPT-IN because it sends real requests to five third-party APIs" in out
+    assert "their outages are not the ceremony's failure" in out and "Without --include-live-apis no third-party request is made" in out
+
+
+def test_the_dry_run_with_the_flag_adds_step_4_and_the_c26_move(tmp_path):
+    got, out, _ = run(["--dry-run", *LIVE_WITH_APIS], {}, Fake(), tmp_path)
+    assert got == 0
+    assert "STEP 4 (live_apis, opt-in)" in out and "--live-apis --allow-live" in out and "C26 (live_apis)" in out
+    assert "<record-hash of step 4>" in out and "cannot hold them up" in out
+
+
+def test_the_flag_appends_step_4_after_the_three_moves_and_moves_c26_on_a_pass(tmp_path):
+    fake = Fake()
+    got, out, _ = run(LIVE_WITH_APIS, GOODENV, fake, tmp_path)
+    assert got == 0, out
+    cmds = [c for c, _ in fake.calls]
+    py = sys.executable
+    assert cmds[3:6] == [[py, "scripts/move_audit_row.py", "--row", r, "--apply", "--record-hash", h] for r, h in
+                         (("C24", "a" * 64), ("C25", "b" * 64), ("C27", "c" * 64))]
+    assert cmds[6] == [py, "scripts/live_judgment.py", "--live-apis", "--allow-live"], "step 4 runs AFTER the three moves"
+    assert cmds[7] == [py, "scripts/move_audit_row.py", "--row", "C26", "--apply", "--record-hash", "d" * 64]
+    assert cmds[8] == ["git", "log", "--oneline", "-5"] and len(cmds) == 9
+    (t,) = transcripts(tmp_path)
+    doc = json.loads(t.read_text(encoding="utf-8"))
+    assert [s["name"] for s in doc["steps"]] == ["planner", "doc", "apply", "live_apis"]
+    assert doc["live_apis"] == {"requested": True, "exit_code": 0, "record_hash": "d" * 64, "outcome": "moved"}
+    assert "CEREMONY COMPLETE: C24, C25, C27, C26 moved" in out
+
+
+def test_a_third_party_outage_in_step_4_is_not_the_ceremonys_failure_and_leaves_c26_in_3a(tmp_path):
+    fake = Fake(step_exit={"--live-apis": 6})
+    got, out, _ = run(LIVE_WITH_APIS, GOODENV, fake, tmp_path)
+    assert got == 0, "an outage of a third-party API must not fail the ceremony"
+    cmds = [c for c, _ in fake.calls]
+    assert not any("C26" in c for c in cmds), "no row move for C26 without a pass"
+    assert sum(1 for c in cmds if "move_audit_row.py" in c[1]) == 3, "the three AI-judgment rows were moved regardless"
+    assert "THIRD_PARTY_UNAVAILABLE" in out and "C26 stays in section 3a" in out and "not the ceremony's failure" in out
+    assert "CEREMONY COMPLETE: C24, C25, C27 moved" in out
+    (t,) = transcripts(tmp_path)
+    doc = json.loads(t.read_text(encoding="utf-8"))
+    assert doc["result"] == "complete" and doc["live_apis"]["outcome"] == "third_party_unavailable" and doc["live_apis"]["exit_code"] == 6
+
+
+def test_a_real_failure_in_step_4_fails_the_ceremony_after_the_three_rows_stay_moved(tmp_path):
+    fake = Fake(step_exit={"--live-apis": 1})
+    got, out, _ = run(LIVE_WITH_APIS, GOODENV, fake, tmp_path)
+    assert got == 1
+    cmds = [c for c, _ in fake.calls]
+    assert sum(1 for c in cmds if "move_audit_row.py" in c[1]) == 3 and not any("C26" in c for c in cmds)
+    (t,) = transcripts(tmp_path)
+    doc = json.loads(t.read_text(encoding="utf-8"))
+    assert doc["live_apis"]["outcome"] == "failed" and all(e["moved"] for e in doc["audit_edits"])
+    assert "already moved and stay moved" in out
+
+
+def test_a_refused_c26_move_fails_the_ceremony_but_not_the_other_rows(tmp_path):
+    fake = Fake(row_exit={"C26": 14})
+    got, out, _ = run(LIVE_WITH_APIS, GOODENV, fake, tmp_path)
+    assert got == 1
+    (t,) = transcripts(tmp_path)
+    doc = json.loads(t.read_text(encoding="utf-8"))
+    assert doc["live_apis"]["outcome"] == "move_refused"
+    assert [e["moved"] for e in doc["audit_edits"]] == [True, True, True, False]
+
+
+def test_step_4_never_runs_if_one_of_the_three_failed(tmp_path):
+    fake = Fake(step_exit={"--doc": 1})
+    got, out, _ = run(LIVE_WITH_APIS, GOODENV, fake, tmp_path)
+    assert got == 1
+    assert not any("--live-apis" in c for c, _ in fake.calls) and not any("move_audit_row.py" in c[1] for c, _ in fake.calls)
+    (t,) = transcripts(tmp_path)
+    doc = json.loads(t.read_text(encoding="utf-8"))
+    assert doc["live_apis"] == {"requested": True, "outcome": "not_reached"}
+
+
+def test_the_refusals_still_apply_with_the_flag_and_nothing_is_sent(tmp_path, network_counter):
+    fake = Fake()
+    got, out, _ = run(["--upstream", URL, "--include-live-apis"], {}, fake, tmp_path)
+    assert got == 20 and fake.calls == [] and network_counter == [] and transcripts(tmp_path) == []
+
+
+def test_the_flag_cannot_be_combined_with_the_offline_proof(tmp_path):
+    got, out, err = run(["--offline-mock", "--include-live-apis"], {}, Fake(), tmp_path)
+    assert got == 64 and "cannot be combined" in err

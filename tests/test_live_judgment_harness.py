@@ -300,7 +300,8 @@ def test_the_dry_run_plan_names_the_node_ids_pytest_really_collects(sub, tmp_pat
 
 # -- 5. SAME-CONTRACT proof ----------------------------------------------------------------------------------
 
-ENTRIES = [(sub, e) for sub, es in lj.LIVE_TESTS.items() for e in es]
+# the AI-judgment subcommands (7 key-gated tests); the live_apis step (14 tests, no key) is covered by tests/test_live_apis_step.py
+ENTRIES = [(sub, e) for sub, es in lj.LIVE_TESTS.items() if sub != "live_apis" for e in es]
 ENTRY_IDS = [f"{s}:{Path(e['file']).name}" for s, e in ENTRIES]
 
 

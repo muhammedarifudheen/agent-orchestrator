@@ -137,7 +137,9 @@ audit: close live judgment gap C24 (<first 12 hex of the record hash>)
 
 with the full 64-character hash in the commit body. Repeat for `C25` (hash from step 3) and `C27` (hash from step 4). The hash is the one the matching step printed on its `RECORD_HASH:` line. Row to subcommand: C24 `--planner`, C25 `--doc`, C27 `--apply`.
 
-Freshness: the record must be no older than 30 minutes (`STALE`). If you took a long break, rerun the step and use its new hash.
+Code attestation: every record carries `repo_hash` and a manifest of the files under test (the test files it ran, what they import, the servers, specs and fixtures they load, and the harness itself; the formula is in `scripts/repo_hash.py` and CLAUDE.md D27). `move_audit_row.py` recomputes it and refuses with `CODE_CHANGED` (exit 18), naming the files, if the code changed since the run. So do not touch the repo between a step and its row move; a step that finds the code changing while it runs records a `fail`.
+
+Freshness: the record must be no older than 30 minutes (`STALE`). Measured offline, the whole ceremony (three subcommands and three moves) takes about 40 seconds, so the oldest record is about half a minute old when its row moves; the real run adds network latency to three subcommands. If you took a long break, rerun the step and use its new hash.
 
 Refusals print `REFUSED (<NAME>): <reason>`. On every one of them: do not edit `AUDIT.md` by hand; fix the cause and, where the table says so, rerun the step.
 
@@ -151,7 +153,8 @@ Refusals print `REFUSED (<NAME>): <reason>`. On every one of them: do not edit `
 | 15 | `ROW_NOT_OPEN` | The row is not in section 3a (already moved, or never there). Check `AUDIT.md` and `git log`; nothing to do if it is already in 2b. |
 | 16 | `WRONG_SUBCOMMAND` | The record belongs to another subcommand than the row (C24 planner, C25 doc, C27 apply). Use the hash from the right step. |
 | 17 | `MOCK` | The record came from the offline mock transport and can never close a gap. Run the real step. |
-| 18 | `DIRTY_AUDIT` | `AUDIT.md` has uncommitted changes. Commit or revert them (not as part of this ceremony), then rerun the move. |
+| 18 | `CODE_CHANGED` | The code under test is not the code the run attested: a test file, a file it exercises or the harness was edited, deleted or added after the run. The refusal names the files (`changed:`, `deleted:`, `added:`). Do not edit the record or the manifest; rerun the step on the current code and use the new hash. |
+| 19 | `DIRTY_AUDIT` | `AUDIT.md` has uncommitted changes. Commit or revert them (not as part of this ceremony), then rerun the move. |
 
 ## 6. Check the three commits
 
@@ -206,6 +209,32 @@ Get-Content (Get-ChildItem .perf\ceremony | Sort-Object Name | Select-Object -La
 
 Attach it to the PR or issue as the audit trail. The same STOP rules apply: if it stops at a failing step, paste the failure and the transcript into the audit trail and leave `AUDIT.md` alone.
 
+## 9a. Optional step 4: the live-API tests (C26)
+
+Step 4 is opt-in because it sends real requests to five third-party APIs (api.open-meteo.com, jsonplaceholder.typicode.com, catfact.ninja, dog.ceo, api.zippopotam.us); their outages are not the ceremony's failure. It is NOT part of the default ceremony: without the flag no third-party request is made.
+
+On its own:
+
+```powershell
+.venv\Scripts\python scripts\live_judgment.py --live-apis --allow-live
+```
+
+`--allow-live` is required (without it the command exits 5 `LIVE_NOT_ALLOWED` and sends nothing). It runs the 14 `test_live` tests of the five real-API servers, unchanged, in a pytest subprocess with `LIVE_TESTS=1`. Outcomes:
+
+| Output | Exit code | Meaning |
+|---|---|---|
+| `PASS (live third-party APIs): 14 live-API tests passed against 5 hosts` | 0 | all 14 passed. The record is `real: true` only if every one of the five hosts was attested real (answered 2xx over httpx's real transport) |
+| `THIRD_PARTY_UNAVAILABLE: ...` | 6 | a host did not answer (connection error or HTTP 5xx), so its tests could not run. Recorded `skipped`, NOT failed. C26 stays in 3a; re-run later |
+| `FAIL (live third-party APIs): ...` | 1 | a host answered but a test failed (the API's shape changed, or a real regression): a genuine failure |
+
+As part of the ceremony: add `--include-live-apis` to the driver. It runs as step 4, AFTER the three rows above have moved, so a third-party outage can never hold them up:
+
+```powershell
+.venv\Scripts\python scripts\live_run_ceremony.py --allow-live --upstream https://httpbin.org/status/418 --include-live-apis
+```
+
+If step 4 passes the driver moves C26 (`move_audit_row.py --row C26`, which requires all 14 tests passing and all five hosts attested real); if it reports `THIRD_PARTY_UNAVAILABLE` the ceremony still completes with the three rows moved and C26 left in 3a; a genuine failure in step 4 makes the ceremony exit 1 after the three rows have moved (they stay moved).
+
 ## 10. When something goes wrong
 
 | Symptom | Meaning | Action |
@@ -214,6 +243,8 @@ Attach it to the PR or issue as the audit trail. The same STOP rules apply: if i
 | `FAIL (live model): ...` with an HTTP 401 from the API | The key is wrong or revoked. The record says `fail` and `real: false`: a 401 is not a successful answer, so the attestation does not count it as a real result. | Do not move any row. Fix the key and rerun the step. The `fail` record stays in the log; that is expected. |
 | `FAIL (live model): step 2 (pipeline): blocked_at_review_gate ...` (`--doc`) | The model flagged operations for review. A legitimate honest failure. | `AUDIT.md` stays. Paste the findings into the audit trail. Do not clear the flags to make it pass. |
 | `FAIL (live model): ... test(s) failed ...` (`--planner`) | The real model's plan broke the contract (wrong industry, missing intent, wrong order). | STOP. Paste into the audit trail. `AUDIT.md` stays. |
+| `THIRD_PARTY_UNAVAILABLE` (exit 6, `--live-apis`) | A third-party API did not answer. Recorded `skipped`; C26 stays in 3a; not a failure of the code or of the ceremony. | Re-run `--live-apis --allow-live` later. |
+| `REFUSED (CODE_CHANGED)`, exit 18 | The code under test changed after the run (files named). | Rerun the step on the current code; never edit the record or its manifest. |
 | `UPSTREAM_HEALTHY` (exit 4) | The upstream answered below 400. | Pick an endpoint that fails with an undeclared status, e.g. `https://httpbin.org/status/418`. |
 | `UPSTREAM_MISSING` (exit 3) | No URL, not a public host, or not reachable. | Check the URL and your network; a loopback address is never accepted. |
 | `LIVE_NOT_ALLOWED` (exit 5) | `--apply URL` without `--allow-live`. | Add `--allow-live` only if you mean to send real requests to that host. |

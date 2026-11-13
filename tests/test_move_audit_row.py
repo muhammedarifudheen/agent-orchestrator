@@ -31,6 +31,7 @@ def _load(name: str):
 
 
 mar = _load("move_audit_row")
+repo_hash = _load("repo_hash")
 NOW = dt.datetime(2026, 11, 13, 12, 0, 0, tzinfo=dt.timezone.utc)
 
 
@@ -62,6 +63,11 @@ class Lab:
         self.repo.mkdir()
         (self.repo / "AUDIT.md").write_text((ROOT / "AUDIT.md").read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
         self.log = tmp / "live_judgment.jsonl"
+        self.code = tmp / "code"  # the throwaway tree whose code every synthetic record attests (scripts/repo_hash.py)
+        for rel, body in {"tests/test_a.py": "import helper\n\ndef test_a():\n    assert helper.ONE == 1\n",
+                          "tests/helper.py": "ONE = 1\n", "servers/x_server.py": "NAME = 'x'\n", "pytest.ini": "[pytest]\n"}.items():
+            (self.code / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.code / rel).write_text(body, encoding="utf-8", newline="\n")
         for args in (["init", "-q"], ["config", "user.name", "t"], ["config", "user.email", "t@t"], ["add", "AUDIT.md"],
                      ["commit", "-q", "-m", "baseline"]):
             subprocess.run(["git", "-C", str(self.repo), *args], check=True, capture_output=True)
@@ -70,7 +76,14 @@ class Lab:
     def record(self, sub: str = "planner", *, minutes_old: float = 1, tamper=None, artifact_text: str | None = None, **over) -> str:
         """Write an artifact and a record line; return the record's full hash."""
         self.n += 1
-        if sub == "apply":
+        if sub == "live_apis":
+            art = self.tmp / f"{self.n}_live_apis.xml"
+            art.write_text(artifact_text or junit(14), encoding="utf-8")
+            hosts = {h: {"real": True, "real_requests": 2, "non_real_requests": 0}
+                     for h in ("api.open-meteo.com", "api.zippopotam.us", "catfact.ninja", "dog.ceo", "jsonplaceholder.typicode.com")}
+            att = {"hosts": hosts, "real": True, "real_requests": 10, "non_real_requests": 0, "host": "five"}
+            base = {"key_present": False, "upstream": None, "allow_live": True, "tests": [f"tests/t.py::test_live[{i}]" for i in range(14)]}
+        elif sub == "apply":
             art = self.tmp / f"{self.n}_apply.json"
             payload = {"upstream": "https://httpbin.org/status/418", "public": True, "allow_live": True,
                        "attestation": {"real": True, "non_real_requests": 0}}
@@ -83,7 +96,11 @@ class Lab:
             att = {"host": "api.anthropic.com", "real": True, "real_requests": 4, "non_real_requests": 0}
             base = {"key_present": True, "upstream": None, "allow_live": False,
                     "tests": [f"tests/t.py::test_{i}" for i in range(6 if sub == "planner" else 1)]}
-        rec = {"date": (NOW - dt.timedelta(minutes=minutes_old)).isoformat(), "subcommand": sub, "result": "pass", "reason": "ok",
+        man = repo_hash.manifest(["tests/test_a.py"], ["servers/*.py"], self.code, harness=())
+        sidecar = self.tmp / f"{self.n}_{sub}.manifest.json"
+        sidecar_sha = repo_hash.write_sidecar(sidecar, man)
+        rec = {"repo_hash": repo_hash.digest(man), "repo_manifest_path": str(sidecar), "repo_manifest_sha256": sidecar_sha,
+               "date": (NOW - dt.timedelta(minutes=minutes_old)).isoformat(), "subcommand": sub, "result": "pass", "reason": "ok",
                "exit_code": 0, "real": True, "mock": False, "artifact_path": str(art),
                "artifact_sha256": hashlib.sha256(art.read_bytes()).hexdigest(), "attestation": att, **base}
         rec.update(over)
@@ -95,7 +112,8 @@ class Lab:
         return hashlib.sha256(line.encode("utf-8")).hexdigest()
 
     def run(self, row: str, h: str | None, *extra: str, now: dt.datetime = NOW) -> tuple[int, str]:
-        argv = ["--row", row, "--log", str(self.log), "--audit", str(self.repo / "AUDIT.md"), "--repo", str(self.repo), *extra]
+        argv = ["--row", row, "--log", str(self.log), "--audit", str(self.repo / "AUDIT.md"), "--repo", str(self.repo),
+                "--code-root", str(self.code), *extra]
         if h:
             argv += ["--record-hash", h]
         out = io.StringIO()
@@ -269,7 +287,7 @@ def test_a_dirty_audit_md_refuses_to_commit_and_writes_nothing(lab):
     path.write_text(path.read_text(encoding="utf-8") + "\nsomeone's uncommitted edit\n", encoding="utf-8")
     dirty = lab.audit()
     code, out = lab.run("C24", h, "--apply")
-    assert code == 18 and lab.audit() == dirty and lab.commits() == ["baseline"]
+    assert code == 19 and lab.audit() == dirty and lab.commits() == ["baseline"]
 
 
 def test_no_commit_edits_the_file_only(lab):
@@ -306,3 +324,119 @@ def test_the_sibling_row_is_untouched_when_one_row_moves(lab):
     after = section_3a(lab.audit())
     assert [ln for ln in before.splitlines() if ln not in after.splitlines()] == [ln for ln in before.splitlines() if ln.startswith("| C25 |")]
     assert copy.copy(after).count("| C24 |") == 1 and after.count("| C27 |") == 1
+
+
+# -- D27/Q2: the record attests the CODE under test; a move refuses if that code changed since --------------------------------------
+
+def test_unchanged_code_lets_the_row_move(lab):
+    h = lab.record("planner")
+    code, out = lab.run("C24", h, "--apply")
+    assert code == 0, out
+    assert "| C24 |" not in section_3a(lab.audit())
+
+
+def test_an_edited_test_file_refuses_with_exit_18_and_names_the_file(lab):
+    h = lab.record("planner")
+    (lab.code / "tests" / "test_a.py").write_text("import helper\n\ndef test_a():\n    assert True  # weakened after the run\n",
+                                                  encoding="utf-8", newline="\n")
+    before = lab.audit()
+    code, out = lab.run("C24", h, "--apply")
+    assert code == 18 == mar.CODES["CODE_CHANGED"], out
+    assert "REFUSED (CODE_CHANGED)" in out and "changed: tests/test_a.py" in out
+    assert lab.audit() == before and lab.commits() == ["baseline"], "a refusal must change nothing"
+
+
+def test_an_edit_to_a_file_the_test_exercises_is_a_code_change_too(lab):
+    h = lab.record("planner")
+    (lab.code / "tests" / "helper.py").write_text("ONE = 2\n", encoding="utf-8", newline="\n")
+    code, out = lab.run("C24", h)
+    assert code == 18 and "changed: tests/helper.py" in out
+
+
+def test_a_deleted_file_refuses_with_exit_18_and_names_it(lab):
+    h = lab.record("planner")
+    (lab.code / "tests" / "helper.py").unlink()
+    before = lab.audit()
+    code, out = lab.run("C24", h, "--apply")
+    assert code == 18, out
+    assert "deleted: tests/helper.py" in out
+    assert lab.audit() == before and lab.commits() == ["baseline"]
+
+
+def test_a_deleted_test_file_is_named_too(lab):
+    h = lab.record("planner")
+    (lab.code / "tests" / "test_a.py").unlink()
+    code, out = lab.run("C24", h)
+    assert code == 18 and "deleted:" in out and "tests/test_a.py" in out.split("deleted:")[1]  # (its import closure goes with it)
+
+
+def test_a_newly_imported_file_is_reported_as_added(lab):
+    h = lab.record("planner")
+    (lab.code / "tests" / "test_a.py").write_text("import helper\nimport extra\n", encoding="utf-8", newline="\n")
+    (lab.code / "tests" / "extra.py").write_text("X = 1\n", encoding="utf-8", newline="\n")
+    code, out = lab.run("C24", h)
+    assert code == 18 and "changed: tests/test_a.py" in out and "added: tests/extra.py" in out
+
+
+def test_a_data_file_loaded_at_run_time_is_part_of_the_code(lab):
+    h = lab.record("planner")
+    (lab.code / "servers" / "x_server.py").write_text("NAME = 'changed'\n", encoding="utf-8", newline="\n")
+    code, out = lab.run("C24", h)
+    assert code == 18 and "changed: servers/x_server.py" in out
+
+
+def test_a_line_ending_only_change_is_not_a_code_change(lab):
+    h = lab.record("planner")
+    path = lab.code / "tests" / "test_a.py"
+    path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+    code, out = lab.run("C24", h)
+    assert code == 0 and "ALLOWED" in out
+
+
+def test_a_record_with_no_code_attestation_cannot_close_a_row(lab):
+    def strip(rec, art):
+        for k in ("repo_hash", "repo_manifest_path", "repo_manifest_sha256"):
+            rec.pop(k)
+    h = lab.record("planner", tamper=strip)
+    code, out = lab.run("C24", h)
+    assert code == 14 and "no repo_hash" in out
+
+
+def test_a_tampered_manifest_is_refused(lab):
+    h = lab.record("planner")
+    record = json.loads(lab.log.read_text(encoding="utf-8").splitlines()[-1])
+    path = Path(record["repo_manifest_path"])
+    man = json.loads(path.read_text(encoding="utf-8"))
+    man["files"]["tests/test_a.py"] = "0" * 64
+    path.write_text(json.dumps(man), encoding="utf-8")
+    code, out = lab.run("C24", h)
+    assert code == 14 and "manifest" in out
+
+
+def test_the_exit_codes_are_distinct_and_dirty_audit_moved_to_19():
+    assert mar.CODES["CODE_CHANGED"] == 18 and mar.CODES["DIRTY_AUDIT"] == 19
+    assert len(set(mar.CODES.values())) == len(mar.CODES)
+
+
+# -- C26: the opt-in live-API row -----------------------------------------------------------------------------------------------------
+
+def test_the_live_apis_row_moves_only_from_14_passing_tests_and_five_hosts_attested_real(lab):
+    h = lab.record("live_apis")
+    code, out = lab.run("C26", h, "--apply")
+    assert code == 0, out
+    assert "| C26 |" not in section_3a(lab.audit())
+    assert "python scripts/live_judgment.py --live-apis --allow-live" in lab.audit()
+
+
+@pytest.mark.parametrize("label,over", [
+    ("only 13 tests", dict(artifact_text=junit(13), tests=[f"t{i}" for i in range(13)])),
+    ("a skipped test", dict(artifact_text=junit(14, skipped=1))),
+    ("no --allow-live", dict(allow_live=False)),
+    ("one host not real", dict(attestation={"hosts": {"a": {"real": True}, "b": {"real": True}, "c": {"real": True}, "d": {"real": True},
+                                                     "e": {"real": False}}, "real": True, "non_real_requests": 0})),
+    ("fewer than five hosts", dict(attestation={"hosts": {"a": {"real": True}}, "real": True, "non_real_requests": 0})),
+])
+def test_a_live_apis_record_that_is_not_all_14_real_is_refused(lab, label, over):
+    h = lab.record("live_apis", **over)
+    code, out = lab.run("C26", h, "--apply")
+    assert code == 14 and lab.commits() == ["baseline"], out

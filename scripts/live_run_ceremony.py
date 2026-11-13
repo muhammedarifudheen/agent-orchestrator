@@ -77,6 +77,10 @@ SKIP_NOTE = ("Moving rows does not change skips: in a shell with neither ANTHROP
              "stays at 26 skipped. With the key AND LIVE_TESTS=1 both set it shows 5 skipped (the 7 key-gated tests run, and so "
              "do the 14 LIVE_TESTS-gated live-API tests, which call five third-party APIs for real).")
 LIVE_DOC = "docs/LIVE_RUN.md"
+LIVE_APIS_ROW = "C26"
+EXIT_THIRD_PARTY_UNAVAILABLE = 6  # live_judgment.py --live-apis: a third-party host did not answer (recorded skipped, not failed)
+LIVE_APIS_NOTE = ("Step 4 (the live-API tests) is OPT-IN because it sends real requests to five third-party APIs; their outages "
+                  "are not the ceremony's failure. Without --include-live-apis no third-party request is made.")
 
 Runner = Callable[[list, Mapping[str, str], float], "tuple[int, str]"]
 
@@ -149,6 +153,9 @@ def _human_commands() -> "list[str]":
 class _Run:
     """Shared state of one non-dry run: output with redaction, the transcript, the runner."""
 
+    include_live_apis = False
+    live_apis: "dict | None" = None
+
     def __init__(self, mode: str, env: Mapping[str, str], stdout: TextIO, stderr: TextIO, runner: Runner,
                  tdir: Path, upstream: "str | None", allow_live: bool, key: str) -> None:
         self.mode, self.env, self.stdout, self.stderr, self.runner = mode, env, stdout, stderr, runner
@@ -187,6 +194,8 @@ class _Run:
                "finished": dt.datetime.now(dt.timezone.utc).isoformat(), "upstream": self.upstream,
                "allow_live": self.allow_live, "key_present": bool(self.key), "steps": self.steps,
                "audit_edits": self.edits, "git_log": self.git_log, "result": result, "next": self.next}
+        if self.include_live_apis:  # only when asked for: the default transcript is exactly the three-step one
+            doc["live_apis"] = self.live_apis or {"requested": True, "outcome": "not_reached"}
         text = self.redact(json.dumps(doc, indent=2))
         try:
             self.tdir.mkdir(parents=True, exist_ok=True)
@@ -211,7 +220,7 @@ def _record_step(run: _Run, n: int, name: str, cmd: list, env: Mapping[str, str]
 # -- the plan (dry run) ------------------------------------------------------------------------------------------------
 
 def _print_plan(out: Callable[[str], None], mode: str, upstream: "str | None", audit: "str | None", log: "str | None",
-                tdir: Path, env: Mapping[str, str], allow_live: bool) -> None:
+                tdir: Path, env: Mapping[str, str], allow_live: bool, include_live_apis: bool = False) -> None:
     url = upstream or PLACEHOLDER_URL
     tpath = tdir / "<UTC YYYYMMDDTHHMMSSZ>.json"
     out(f"CEREMONY PLAN ({mode}): nothing is executed and nothing is written by --dry-run")
@@ -241,6 +250,13 @@ def _print_plan(out: Callable[[str], None], mode: str, upstream: "str | None", a
         for row, name, i in ROWS:
             cmd = _move_cmd(row, f"<record-hash of step {i + 1}>", audit, log)
             out(f"  {row} ({name}): {' '.join(cmd)}")
+        if include_live_apis:
+            out("STEP 4 (live_apis, opt-in): " + " ".join([sys.executable, "scripts/live_judgment.py", "--live-apis", "--allow-live"]))
+            out("    sends real requests to five third-party APIs; runs AFTER the three rows above have moved, so an outage there "
+                "cannot hold them up; if it passes:")
+            out("  " + " ".join(["C26 (live_apis):", *_move_cmd(LIVE_APIS_ROW, "<record-hash of step 4>", audit, log)]))
+            out("    an outage (exit 6, recorded skipped) leaves C26 in section 3a and is not the ceremony's failure")
+        out("  " + LIVE_APIS_NOTE)
         out("  A refused row stops the ceremony; rows already moved stay moved. Then: git log --oneline -5")
         out(f"  Next manual commands: {PYTEST_NEXT}")
         out(f"  {SKIP_NOTE}")
@@ -406,16 +422,43 @@ def _live(run: _Run, audit: "str | None", log: "str | None") -> int:
             run.next = [" ".join(["python"] + cmd[1:])]
             run.finish("refused_row")
             return EXIT_FAIL
+    moved_rows = ["C24", "C25", "C27"]
+    failed_after = False
+    if run.include_live_apis:
+        code, rh = _record_step(run, 4, "live_apis", [sys.executable, "scripts/live_judgment.py", "--live-apis", "--allow-live"], env)
+        outcome = None
+        if code == 0 and rh:
+            cmd = _move_cmd(LIVE_APIS_ROW, rh, audit, log)
+            run.out(f"MOVE {LIVE_APIS_ROW} (live_apis): {' '.join(cmd[1:])}")
+            mcode, moutput = run.run_child(cmd, env)
+            run.edits.append({"row": LIVE_APIS_ROW, "command": cmd, "exit_code": mcode, "output": moutput, "moved": mcode == 0})
+            run.out(f"  exit {mcode}")
+            run.show_output(moutput)
+            outcome = "moved" if mcode == 0 else "move_refused"
+            failed_after = mcode != 0
+            if mcode == 0:
+                moved_rows.append(LIVE_APIS_ROW)
+        elif code == EXIT_THIRD_PARTY_UNAVAILABLE:
+            outcome = "third_party_unavailable"
+            run.out("THIRD_PARTY_UNAVAILABLE: a third-party API did not answer, so its tests could not run. C26 stays in section 3a; "
+                    "this is not the ceremony's failure and C24, C25 and C27 are unaffected. Re-run `python scripts/live_judgment.py "
+                    "--live-apis --allow-live` later.")
+        else:
+            outcome = "failed"
+            failed_after = True
+            run.out(f"STEP 4 (live_apis) failed or left no record (exit {code}). C24, C25 and C27 were already moved and stay moved; "
+                    "C26 stays in section 3a.")
+        run.live_apis = {"requested": True, "exit_code": code, "record_hash": rh, "outcome": outcome}
     gcode, gout = run.run_child(["git", "log", "--oneline", "-5"], env)
     run.git_log = gout
     run.out("git log --oneline -5:")
     run.show_output(gout)
     run.next = [PYTEST_NEXT, SKIP_NOTE]
-    run.out("CEREMONY COMPLETE: C24, C25 and C27 moved. Next manual commands:")
+    run.out(f"CEREMONY COMPLETE: {', '.join(moved_rows)} moved. Next manual commands:")
     run.out(f"  {PYTEST_NEXT}")
     run.out(f"  {SKIP_NOTE}")
     run.finish("complete")
-    return EXIT_OK
+    return EXIT_FAIL if failed_after else EXIT_OK
 
 
 # -- entry point -------------------------------------------------------------------------------------------------------
@@ -431,6 +474,8 @@ def main(argv: "list[str] | None" = None, env: "Mapping[str, str] | None" = None
     ap.add_argument("--upstream", help="URL of a real endpoint that FAILS with an undeclared status, e.g. https://httpbin.org/status/418")
     ap.add_argument("--dry-run", action="store_true", help="print the whole plan; execute and write nothing")
     ap.add_argument("--offline-mock", action="store_true", help="prove the ceremony on mocks; can never close a gap")
+    ap.add_argument("--include-live-apis", action="store_true", dest="include_live_apis",
+                    help="OPT-IN step 4: the 14 live-API tests (real requests to five third-party APIs); never part of the default")
     ap.add_argument("--audit", help="AUDIT.md path passed to move_audit_row.py")
     ap.add_argument("--log", help="record log path passed to move_audit_row.py")
     ap.add_argument("--transcript-dir", help="directory for the transcript (default .perf/ceremony)")
@@ -439,6 +484,10 @@ def main(argv: "list[str] | None" = None, env: "Mapping[str, str] | None" = None
     except _UsageError as exc:
         stderr.write(f"usage error: {exc}\n")
         return EXIT_USAGE
+    if a.include_live_apis and a.offline_mock:
+        stderr.write("usage error: --include-live-apis cannot be combined with --offline-mock (the offline proof makes no "
+                     "third-party request)\n")
+        return EXIT_USAGE
     tdir = Path(a.transcript_dir) if a.transcript_dir else ROOT / ".perf" / "ceremony"
     key = env.get("ANTHROPIC_API_KEY", "")
     mode = "offline-mock" if a.offline_mock else "live"
@@ -446,7 +495,7 @@ def main(argv: "list[str] | None" = None, env: "Mapping[str, str] | None" = None
     if a.dry_run:
         def out(text: str) -> None:
             stdout.write(text.replace(key, "[REDACTED]") + "\n" if key else text + "\n")
-        _print_plan(out, mode, a.upstream, a.audit, a.log, tdir, env, a.allow_live)
+        _print_plan(out, mode, a.upstream, a.audit, a.log, tdir, env, a.allow_live, a.include_live_apis)
         return EXIT_OK
 
     if mode == "live":
@@ -474,6 +523,7 @@ def main(argv: "list[str] | None" = None, env: "Mapping[str, str] | None" = None
             return refusals[0][0]
 
     run = _Run(mode, env, stdout, stderr, runner, tdir, a.upstream, a.allow_live, key)
+    run.include_live_apis = bool(a.include_live_apis)
     if mode == "offline-mock":
         return _offline(run, a.audit, a.log)
     return _live(run, a.audit, a.log)

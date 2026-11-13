@@ -1,4 +1,4 @@
-# Onboarding: a 30-minute walkthrough
+﻿# Onboarding: a 30-minute walkthrough
 
 Windows, PowerShell, from the repo root. Python 3.11+ (built on 3.12). Every command below was run on a machine whose `.venv` already existed; building the venv from nothing was not re-tested.
 Work on a throwaway branch so nothing you try lands in the project (step 0 and the last step). Run ONE test command at a time (the copied `mycat.yaml` keeps catfact's description and base URL; that is harmless, the tests are offline): two suites at once slow each other down enough to trigger budget warnings, an `INVALID RUN`, or a script that looks hung (steps vii and ix).
@@ -14,7 +14,7 @@ git switch -c onboarding-practice
 
 The first command creates `.venv` only if it is missing (re-running venv creation with the venv's own interpreter fails with `Permission denied`). If you have uncommitted changes, `git switch -c` carries them to the new branch and `git switch main` at the end brings them back; the Finish step touches only the files this page creates.
 
-Expected last line: `989 passed, 26 skipped in <about 150-300> s`, exit code 0. (The count changes when tests are added;
+Expected last line: `1045 passed, 26 skipped in <about 150-300> s`, exit code 0. (The count changes when tests are added;
 what must not change is `0 failed`.) pip may print a "new release of pip is available" notice; it is harmless.
 You do NOT need an `ANTHROPIC_API_KEY` for anything on this page. Every command below spells out `.venv\Scripts\python` on purpose: bare `python` is
 your system Python, which does not have the project's packages (`ModuleNotFoundError: No module named 'jsonschema'`).
@@ -148,7 +148,7 @@ The 26 skips are all deliberate and each is listed with its reason in `AUDIT.md`
 internet), 7 need `ANTHROPIC_API_KEY` (a real model) (`.venv\Scripts\python scripts\live_judgment.py --planner --dry-run` shows what closing those would run, without a key), 2 are `slow` tests (`--runslow`: the end-to-end apply test and the audit's
 run-every-cited-test), 1 is "retail: no outage probe", and 2 are probes started only by another test.
 
-Counts change as you add tests: after steps i-v the suite shows about `1013 passed, 30 skipped` (the practice system adds tests and 4 live
+Counts change as you add tests: after steps i-v the suite shows about `1069 passed, 30 skipped` (the practice system adds tests and 4 live
 skips) and `2 failed`: `test_every_discovered_file_is_audited_exactly_once` and `test_a_server_added_without_updating_audit_md_fails_by_name` in
 `tests/test_audit_completeness.py`, which is expected until `AUDIT.md` lists `mycat` (step viii).
 

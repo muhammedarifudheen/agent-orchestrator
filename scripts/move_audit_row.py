@@ -4,7 +4,7 @@
   python scripts/move_audit_row.py --row C24 [--record-hash H]            read-only: run every check, print the diff it WOULD make
   python scripts/move_audit_row.py --row C24 --apply --record-hash H      the same checks, then edit AUDIT.md and commit it
 
-Rows and the subcommand of scripts/live_judgment.py that closes each: C24 planner, C25 doc, C27 apply. The record is one line
+Rows and the subcommand of scripts/live_judgment.py that closes each: C24 planner, C25 doc, C27 apply, C26 live_apis (opt-in, D28). The record is one line
 of .perf/live_judgment.jsonl, named by (a prefix of) its SHA-256 (live_judgment.py prints `RECORD_HASH: <hex>`).
 
 A row moves ONLY when ALL of these hold; the first that does not hold refuses with `REFUSED (<NAME>): <reason>`:
@@ -18,8 +18,11 @@ A row moves ONLY when ALL of these hold; the first that does not hold refuses wi
                        one recorded; planner/doc: the junit report is re-classified here and must be a pass with the recorded
                        number of tests, none skipped, and a key was present; apply: a public upstream, --allow-live, and an
                        attested answer from that host
+  18 CODE_CHANGED      the code under test is the code that was tested: the record's repo_hash (scripts/repo_hash.py, D27) still
+                       matches the repo; if a test file or a file it exercises was edited, deleted or added since, the run
+                       attested code that is no longer there, and the refusal names the files
   15 ROW_NOT_OPEN      the row is still in section 3a (a row already moved is not moved twice)
-  18 DIRTY_AUDIT       (with --apply and committing) AUDIT.md has no uncommitted changes and nothing else is staged
+  19 DIRTY_AUDIT       (with --apply and committing) AUDIT.md has no uncommitted changes and nothing else is staged
   10 NO_RECORD         the hash names exactly one record in the log
 On success it prints the diff, removes the row from 3a, adds it to `### 2b. Proven live` (the record hash, date, command and the
 evidence hash), and commits `audit: close live judgment gap <row> (<first 12 hex of the hash>)` (the full hash and the evidence
@@ -46,15 +49,16 @@ from typing import Any, Callable, Mapping, TextIO
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-ROWS = {"C24": "planner", "C25": "doc", "C27": "apply"}
+ROWS = {"C24": "planner", "C25": "doc", "C27": "apply", "C26": "live_apis"}
 FRESH_MINUTES = 30
 CODES = {"NO_RECORD": 10, "NOT_REAL": 11, "NOT_PASS": 12, "STALE": 13, "EVIDENCE_MISMATCH": 14, "ROW_NOT_OPEN": 15,
-         "WRONG_SUBCOMMAND": 16, "MOCK": 17, "DIRTY_AUDIT": 18}
+         "WRONG_SUBCOMMAND": 16, "MOCK": 17, "CODE_CHANGED": 18, "DIRTY_AUDIT": 19}
 EXIT_OK, EXIT_USAGE = 0, 64
 MIN_HASH = 12
 HEADING_2B = "### 2b. Proven live"
 COMMANDS = {"planner": "python scripts/live_judgment.py --planner", "doc": "python scripts/live_judgment.py --doc",
-            "apply": "python scripts/live_judgment.py --apply <URL> --allow-live"}
+            "apply": "python scripts/live_judgment.py --apply <URL> --allow-live",
+            "live_apis": "python scripts/live_judgment.py --live-apis --allow-live"}
 
 
 class Refusal(Exception):
@@ -101,7 +105,7 @@ def _sha256_file(path: str | Path | None) -> str | None:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest() if path and Path(path).is_file() else None
 
 
-def check_record(row: str, record: dict[str, Any], now: dt.datetime) -> None:
+def check_record(row: str, record: dict[str, Any], now: dt.datetime, code_root: Path = ROOT) -> None:
     """Raise Refusal unless the record can close `row`. The ORDER is part of the contract: mock and not-real first."""
     sub = ROWS[row]
     if record.get("mock") is True:
@@ -123,6 +127,7 @@ def check_record(row: str, record: dict[str, Any], now: dt.datetime) -> None:
         raise Refusal("STALE", f"the record is {int(age.total_seconds() // 60)} minutes old (limit {FRESH_MINUTES}): a historical "
                       "record is not evidence. Re-run the subcommand and use its new RECORD_HASH")
     _check_evidence(sub, record)
+    _check_code(record, code_root)
 
 
 def _check_evidence(sub: str, record: dict[str, Any]) -> None:
@@ -138,7 +143,20 @@ def _check_evidence(sub: str, record: dict[str, Any]) -> None:
         raise bad(f"the evidence artifact {artifact!r} is missing")
     if actual != recorded:
         raise bad(f"the artifact {artifact} has SHA-256 {actual[:12]}..., the record says {str(recorded)[:12]}...: it changed")
-    if sub in ("planner", "doc"):
+    if sub == "live_apis":
+        from live_judgment import classify_junit
+
+        tests = record.get("tests") or []
+        verdict, why = classify_junit(Path(artifact).read_text(encoding="utf-8"), len(tests))
+        if len(tests) != 14 or verdict != "pass":
+            raise bad(f"re-classifying the junit report gives {verdict!r} for {len(tests)} recorded test(s) (14 live-API tests are "
+                      f"required, all passing, none skipped): {why[:160]}")
+        hosts = att.get("hosts") or {}
+        if len(hosts) < 5 or not all((h or {}).get("real") for h in hosts.values()):
+            raise bad("every one of the five third-party hosts must be attested real; this record's attestation says otherwise")
+        if record.get("allow_live") is not True:
+            raise bad("the run was not made with --allow-live")
+    elif sub in ("planner", "doc"):
         if record.get("key_present") is not True:
             raise bad("no key was present for a planner/doc run")
         from live_judgment import classify_junit  # the harness's own classifier: the same rule, applied again here
@@ -161,6 +179,33 @@ def _check_evidence(sub: str, record: dict[str, Any]) -> None:
             raise bad("the apply transcript is not readable JSON") from None
         if transcript.get("public") is not True or transcript.get("allow_live") is not True or not (transcript.get("attestation") or {}).get("real"):
             raise bad("the apply transcript does not say: public upstream, --allow-live, attested answers")
+
+
+def _check_code(record: dict[str, Any], code_root: Path) -> None:
+    """The record attests the code under test (scripts/repo_hash.py); refuse if that code is not the code that is here now."""
+    import repo_hash
+
+    path, recorded_sha, recorded_hash = record.get("repo_manifest_path"), record.get("repo_manifest_sha256"), record.get("repo_hash")
+    if not (path and recorded_sha and recorded_hash):
+        raise Refusal("EVIDENCE_MISMATCH", "the record has no repo_hash / manifest: it does not attest the code under test, so it "
+                      "cannot close a row (re-run the subcommand with the current harness)")
+    actual = _sha256_file(path)
+    if actual is None:
+        raise Refusal("EVIDENCE_MISMATCH", f"the code manifest {path} is missing")
+    if actual != recorded_sha:
+        raise Refusal("EVIDENCE_MISMATCH", f"the code manifest {path} changed since the record was made")
+    try:
+        manifest = json.loads(Path(path).read_text(encoding="utf-8"))
+        ok = repo_hash.digest(manifest) == recorded_hash
+    except (ValueError, KeyError):
+        ok = False
+    if not ok:
+        raise Refusal("EVIDENCE_MISMATCH", "the code manifest does not hash to the record's repo_hash")
+    changes = repo_hash.diff(manifest, code_root)
+    if any(changes.values()):
+        named = "; ".join(f"{kind}: {', '.join(files)}" for kind, files in changes.items() if files)
+        raise Refusal("CODE_CHANGED", f"the code under test changed since the run ({named}). The record attests code that is no "
+                      "longer here: re-run the subcommand on the current code and use its new RECORD_HASH")
 
 
 # -- the AUDIT.md edit ---------------------------------------------------------------------------------------------------------
@@ -258,6 +303,8 @@ def main(argv: list[str] | None = None, stdout: TextIO | None = None, now: Calla
     ap.add_argument("--log", type=Path, default=None)
     ap.add_argument("--no-commit", action="store_true", help="edit the file but do not commit")
     ap.add_argument("--repo", type=Path, default=None, help="the git work tree to commit in (default: the repo)")
+    ap.add_argument("--code-root", type=Path, default=ROOT, help="the tree whose code the record's repo_hash is compared with "
+                    "(default: the repo; tests point it at a throwaway tree)")
     try:
         args = ap.parse_args(argv)
     except SystemExit as exc:
@@ -281,7 +328,7 @@ def main(argv: list[str] | None = None, stdout: TextIO | None = None, now: Calla
                 "its hash and --apply)")
         say(f"record {full[:MIN_HASH]} (line {n} of {log}): subcommand={record.get('subcommand')} result={record.get('result')} "
             f"real={record.get('real')} mock={record.get('mock')} date={record.get('date')}")
-        check_record(args.row, record, moment)
+        check_record(args.row, record, moment, args.code_root)
         old = args.audit.read_text(encoding="utf-8")
         new = plan_edit(old, args.row, record, full)
         diff = "".join(difflib.unified_diff(old.replace("\r\n", "\n").splitlines(True), new.splitlines(True),

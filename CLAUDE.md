@@ -664,9 +664,9 @@ implemented them. Change them here first, then in code.
   failure (AUDIT.md untouched), and only if all three passed calls `scripts/move_audit_row.py` for C24, C25, C27 with each step's record hash; it
   writes a transcript (`.perf/ceremony/<UTC>.json`: every command, output, audit edit; the key never appears in it). `--dry-run` prints the whole
   plan without a key. `move_audit_row.py` is the ONLY way a row leaves AUDIT.md section 3a: it checks, in this order, MOCK (17), NOT_REAL (11),
-  NOT_PASS (12), WRONG_SUBCOMMAND (16), STALE (13: the record is at most 30 minutes old; no option extends it), EVIDENCE_MISMATCH (14: the artifact
+  NOT_PASS (12), WRONG_SUBCOMMAND (16), STALE (13: the record is at most 30 minutes old; no option extends it), EVIDENCE_MISMATCH (14: a record with no code attestation, or whose manifest sidecar is missing or does not hash to the recorded value, is a mismatch too; the artifact
   exists and hashes to what the record says; planner/doc: the junit report is re-classified and must be a pass with the recorded test count and a
-  key present; apply: a public upstream, `--allow-live`, attested answers), ROW_NOT_OPEN (15), DIRTY_AUDIT (18) and NO_RECORD (10); then removes the row
+  key present; apply: a public upstream, `--allow-live`, attested answers), CODE_CHANGED (18, see below), ROW_NOT_OPEN (15), DIRTY_AUDIT (19: renumbered from 18 when CODE_CHANGED took 18) and NO_RECORD (10); then removes the row
   from 3a, adds it to a new `### 2b. Proven live` table (record hash, date, command, evidence hash) and commits
   `audit: close live judgment gap <row> (<first 12 hex of the record hash>)` with the full hash and the evidence hash in the body, one commit per
   row. Interpretation recorded: the brief said move_audit_row must re-verify "with a fresh live run"; a second paid run would add cost and no
@@ -678,6 +678,41 @@ implemented them. Change them here first, then in code.
   and 2b and that AUDIT section 6 lists exactly the 3a rows that remain. Arithmetic corrected: moving rows changes no skip; with ANTHROPIC_API_KEY and
   LIVE_TESTS=1 both set the default run shows 5 skipped (the 7 key-gated tests run, and `LIVE_TESTS=1` also unlocks the 14 live-API tests), not
   19. docs/LIVE_RUN.md is the step-by-step procedure; AUDIT section 5 is the one-paragraph version.
+  CODE ATTESTATION (added after the first report): THE RECORD ATTESTS THE CODE UNDER TEST; MOVE REFUSES IF THE CODE CHANGED SINCE. Every record
+  carries `repo_hash`, `repo_manifest_path` and `repo_manifest_sha256`; `scripts/move_audit_row.py` recomputes the hash on the CURRENT tree and
+  refuses with CODE_CHANGED (exit 18, REFUSED_CODE_CHANGED), naming the files that `changed:`, were `deleted:` or were `added:` to the closure
+  (a deleted file is a refusal too; `--code-root` points it at another tree, which is how the tests run it in a tmp repo). THE FORMULA (committed
+  here and in `scripts/repo_hash.py`, no timestamps, no absolute paths): (1) per subcommand there are ROOT FILES (the test files it runs and the
+  production entry points it drives) and DATA GLOBS (loaded at run time, not imported: servers, specs, fixtures, scenarios, duties); (2) the
+  manifest = the static `ast` import closure of the roots (modules resolved against the repo root, servers/, tests/, tests/scenarios/ and
+  scripts/; package `__init__.py` files included) + the files matching the data globs + the harness itself (`scripts/live_judgment.py`,
+  `live_attest.py`, `live_attest_site/sitecustomize.py`, `repo_hash.py`) + `pytest.ini`; (3) each file is hashed as SHA-256 of its bytes with
+  CRLF normalised to LF; (4) `repo_hash` = SHA-256 of the text of one line `<posix path relative to the repo>\t<file sha256>\n` per file, sorted
+  by path. The manifest is stored as `<stamp>_<subcommand>.manifest.json` beside the record. It is computed at the START of a run and checked
+  again when the record is written: a pass during which the code changed is recorded `fail` ("CODE CHANGED DURING THE RUN"). Not covered: the
+  third-party packages in .venv, the Python version and the remote services. A bug found and fixed while building it: relative imports were
+  encoded with ":" as separator, which broke on Windows drive letters and silently dropped files reached by a relative import from the closure
+  (caught by `test_the_manifest_is_the_import_closure_plus_the_data_globs_and_nothing_else`).
+  MEASURED FRESHNESS WINDOW. The offline ceremony (three subcommands on mocks plus three move attempts, `--offline-mock`) took 38 s wall-clock
+  (2026-11-13, 08:49:21Z to 08:49:59Z; measured, not estimated). That is under 10 minutes, so the 30-minute window is KEPT, not raised: the
+  oldest record is about half a minute old when its row moves. Real-run time is bounded by network latency on three subcommands; measured
+  offline at 0.63 min. Reasons not to extend it further: a longer window only lets a record outlive the code and the day it attested, and the
+  worst case (the sum of the step timeouts) is theoretical, because a step that times out fails the ceremony before any row moves. If a real run
+  ever exceeds 10 minutes, the window is raised to 2 hours by a decision recorded here with the measured time, never by an option.
+- D28. C26 is closed by an opt-in step, not the default ceremony; third-party API health is recorded but does not block AI-judgment gap closure.
+  `python scripts/live_judgment.py --live-apis --allow-live` runs the 14 existing live-API tests (the five real-API servers: weather,
+  jsonplaceholder, catfact, dogceo, zippopotamus) with `LIVE_TESTS=1` in a pytest subprocess, records subcommand `live_apis` and `real: <attested>`
+  (true only if every one of the five hosts answered 2xx over httpx's real transport; the same attestation as D26). It needs `--allow-live`
+  (exit 5 LIVE_NOT_ALLOWED, nothing sent, otherwise) because it sends real requests to third parties: this deviates from the bare command in the
+  brief and is consistent with `--apply`. A pass closes C26 (through `move_audit_row.py --row C26`: 14 passing tests, five hosts real, same
+  freshness, code and mock checks) ONLY if all 14 pass real and attested. If a third-party API is down (a host attested with no answer or a 5xx, and every failing test
+  belongs to a down host) the record is `skipped` with the reason, exit 6 (THIRD_PARTY_UNAVAILABLE), the row stays in 3a, and nothing is marked failed;
+  a host that answered but whose test failed, or a failure on a host that is up, is a genuine `fail`. The ceremony (`live_run_ceremony.py --allow-live`)
+  stays at three steps by default and makes zero third-party requests (tested with the network patched to count calls); `--include-live-apis`
+  appends step 4 AFTER the three rows moved, so an outage can never hold them up; a step-4 outage leaves the ceremony successful with C26 in 3a, a
+  genuine step-4 failure exits 1 with the three rows still moved. Step 4 is opt-in because it sends real requests to five third-party APIs; their
+  outages are not the ceremony's failure. Not run: this package did not send a real request to any of the five APIs (the 14 tests were proven
+  runnable against a loopback stand-in, recorded `real: false`).
 
 ## Architecture: genericity
 
