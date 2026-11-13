@@ -640,6 +640,7 @@ implemented them. Change them here first, then in code.
   and no budget change. KNOWN LIMITS: the throwaway project is isolated for what it writes but `pipeline._verify` still runs with the real repo as its
   working directory and uses the real `tests/test_contract.py`; the apply loop's approval is simulated; a wrong key records `fail` and, since D26, `real: false` (this clause originally said `real: true`);
   the harness has never run against a real key or a real upstream.
+  A leaked key is revoked, not reused; the failed record stays in the log as evidence, not as a retry candidate. (2026-11-13: the key used in the first ceremony attempt was pasted into a chat transcript and was revoked; that attempt stopped at step 1 on a billing error, `real: false`, and `.perf/live_judgment.jsonl` holds no key material.)
 - D26. `real` is ATTESTED, not asserted (Package 10). D25 let the harness decide `real` from its own flags, so a fake key against the
   production endpoint recorded `real: true`. Now every Python process of a live-judgment run (the harness, the pytest subprocess, the spawned
   MCP servers: `scripts/live_attest_site/sitecustomize.py` on PYTHONPATH) appends `{host, transport, status}` for every `httpx.Client.send` to
