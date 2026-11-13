@@ -104,9 +104,15 @@ class Lab:
                "date": (NOW - dt.timedelta(minutes=minutes_old)).isoformat(), "subcommand": sub, "result": "pass", "reason": "ok",
                "exit_code": 0, "real": True, "mock": False, "artifact_path": str(art),
                "artifact_sha256": hashlib.sha256(art.read_bytes()).hexdigest(), "attestation": att, **base}
+        rec.update({"provider": "anthropic", "provider_host": _HOST})
         rec.update(over)
         if tamper:
             tamper(rec, art)
+        if "closes_gap" not in over:  # what live_judgment.py would have written for these fields
+            from live_judgment import closes_gap  # scripts/ is on sys.path once move_audit_row is loaded
+
+            rec["closes_gap"] = closes_gap(rec["subcommand"], rec.get("provider"), rec.get("provider_host"), rec.get("result"),
+                                           rec.get("real") is True)
         line = json.dumps(rec, sort_keys=True)
         with self.log.open("a", encoding="utf-8", newline="\n") as fh:
             fh.write(line + "\n")
@@ -288,7 +294,7 @@ def test_a_dirty_audit_md_refuses_to_commit_and_writes_nothing(lab):
     path.write_text(path.read_text(encoding="utf-8") + "\nsomeone's uncommitted edit\n", encoding="utf-8")
     dirty = lab.audit()
     code, out = lab.run("C24", h, "--apply")
-    assert code == 19 and lab.audit() == dirty and lab.commits() == ["baseline"]
+    assert code == 23 and lab.audit() == dirty and lab.commits() == ["baseline"]
 
 
 def test_no_commit_edits_the_file_only(lab):
@@ -414,8 +420,8 @@ def test_a_tampered_manifest_is_refused(lab):
     assert code == 14 and "manifest" in out
 
 
-def test_the_exit_codes_are_distinct_and_dirty_audit_moved_to_19():
-    assert mar.CODES["CODE_CHANGED"] == 18 and mar.CODES["DIRTY_AUDIT"] == 19
+def test_the_exit_codes_are_distinct_and_dirty_audit_moved_to_23():
+    assert mar.CODES["CODE_CHANGED"] == 18 and mar.CODES["PROVIDER"] == 19 and mar.CODES["DIRTY_AUDIT"] == 23
     assert len(set(mar.CODES.values())) == len(mar.CODES)
 
 
@@ -441,3 +447,68 @@ def test_a_live_apis_record_that_is_not_all_14_real_is_refused(lab, label, over)
     h = lab.record("live_apis", **over)
     code, out = lab.run("C26", h, "--apply")
     assert code == 14 and lab.commits() == ["baseline"], out
+
+
+# -- D27/D29: closes_gap is provider-gated; a non-Anthropic pass is recorded but cannot move an audit row --------------------------------------
+
+def test_an_ollama_pass_record_cannot_move_c24(lab):
+    # exactly what the harness writes for an Ollama run that passed: provider ollama, real false (never attested to the production host),
+    # closes_gap null. It is refused for its PROVIDER (exit 19), before NOT_REAL could even be asked.
+    h = lab.record("planner", provider="ollama", provider_host="localhost", real=False)
+    before = lab.audit()
+    got, out = lab.run("C24", h, "--apply")
+    assert got == 19 and "REFUSED (PROVIDER)" in out and "'ollama'" in out and "Claude-specific" in out, out
+    assert lab.audit() == before and lab.commits() == ["baseline"], "a refusal changes nothing"
+    # the same record with every other field forged to look perfect (real true, closes_gap C24) is still refused
+    forged = lab.record("planner", provider="ollama", provider_host="localhost", real=True, closes_gap="C24")
+    got, out = lab.run("C24", forged, "--apply")
+    assert got == 19 and "REFUSED (PROVIDER)" in out and lab.audit() == before and lab.commits() == ["baseline"]
+
+
+@pytest.mark.parametrize("provider,host", [("ollama", "localhost"), ("freellmpool", "pool.test"), ("openrouter", "openrouter.ai"), ("mystery", "x")])
+@pytest.mark.parametrize("row,sub", [("C24", "planner"), ("C25", "doc"), ("C27", "apply")])
+def test_no_non_anthropic_provider_can_move_any_claude_specific_row(lab, provider, host, row, sub):
+    h = lab.record(sub, provider=provider, provider_host=host)
+    got, out = lab.run(row, h, "--apply")
+    assert got == 19 and "REFUSED (PROVIDER)" in out, out
+    assert lab.commits() == ["baseline"]
+
+
+PROVIDER_FIELD_CASES = [
+    ("closes_gap null", dict(closes_gap=None)), ("closes_gap names another row", dict(closes_gap="C25")),
+    ("no provider field", dict(provider=None)), ("production host replaced by a proxy", dict(provider_host="gateway.example.test")),
+    ("closes_gap forged on a pass the fields do not support", dict(provider_host="gateway.example.test", closes_gap="C24")),
+]
+
+
+@pytest.mark.parametrize("label,over", PROVIDER_FIELD_CASES, ids=[c[0] for c in PROVIDER_FIELD_CASES])
+def test_an_anthropic_record_whose_closes_gap_does_not_match_the_row_is_refused_with_19(lab, label, over):
+    h = lab.record("planner", **over)
+    got, out = lab.run("C24", h, "--apply")
+    assert got == 19 and "REFUSED (PROVIDER)" in out, out
+    assert lab.commits() == ["baseline"]
+
+
+def test_an_anthropic_real_pass_still_moves_its_row_and_the_provider_is_in_the_record(lab):
+    h = lab.record("planner")
+    rec = json.loads(lab.log.read_text(encoding="utf-8").splitlines()[-1])
+    assert rec["provider"] == "anthropic" and rec["closes_gap"] == "C24"
+    got, out = lab.run("C24", h, "--apply")
+    assert got == 0, out
+    assert len(lab.commits()) == 2 and "| C24 |" not in lab.audit().split("### 2b. Proven live")[0].split("3a")[-1]
+
+
+def test_the_third_party_api_row_is_not_provider_gated_but_still_needs_its_own_closes_gap(lab):
+    bad = lab.record("live_apis", closes_gap=None)
+    got, out = lab.run("C26", bad, "--apply")
+    assert got == 19 and "REFUSED (PROVIDER)" in out and lab.commits() == ["baseline"]
+    h = lab.record("live_apis", provider="ollama", provider_host="localhost")  # C26 involves no LLM, so the provider is irrelevant
+    got, out = lab.run("C26", h, "--apply")
+    assert got == 0, out
+
+
+def test_the_provider_check_runs_before_not_real_so_a_real_ollama_run_is_told_why():
+    assert mar.CODES["MOCK"] == 17  # the mock check is still first
+    import inspect
+    src = inspect.getsource(mar.check_record)
+    assert src.index('"MOCK"') < src.index('"PROVIDER"') < src.index('"NOT_REAL"') < src.index('"NOT_PASS"') < src.index('"WRONG_SUBCOMMAND"')

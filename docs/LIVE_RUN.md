@@ -154,7 +154,8 @@ Refusals print `REFUSED (<NAME>): <reason>`. On every one of them: do not edit `
 | 16 | `WRONG_SUBCOMMAND` | The record belongs to another subcommand than the row (C24 planner, C25 doc, C27 apply). Use the hash from the right step. |
 | 17 | `MOCK` | The record came from the offline mock transport and can never close a gap. Run the real step. |
 | 18 | `CODE_CHANGED` | The code under test is not the code the run attested: a test file, a file it exercises or the harness was edited, deleted or added after the run. The refusal names the files (`changed:`, `deleted:`, `added:`). Do not edit the record or the manifest; rerun the step on the current code and use the new hash. |
-| 19 | `DIRTY_AUDIT` | `AUDIT.md` has uncommitted changes. Commit or revert them (not as part of this ceremony), then rerun the move. |
+| 19 | `PROVIDER` | The record is not from the Anthropic provider (or its `closes_gap` is null, names another row, or does not follow from its own fields). C24, C25 and C27 are Claude-specific: a pass through Ollama, freellmpool or OpenRouter is recorded (AUDIT.md section 7) but cannot move a row. Re-run with `PROVIDER_NAME` unset (or `anthropic`) and a real Anthropic key. |
+| 23 | `DIRTY_AUDIT` | `AUDIT.md` has uncommitted changes. Commit or revert them (not as part of this ceremony), then rerun the move. |
 
 ## 6. Check the three commits
 

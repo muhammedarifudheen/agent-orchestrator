@@ -222,7 +222,7 @@ def test_installing_the_mock_is_undone_and_leaves_no_trace_in_other_tests():
 
 def run_cli(args, env_extra, log):
     import os
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "LIVE_"))}  # a normal environment, minus any real key
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "LIVE_", "PROVIDER_"))}  # a normal environment, minus any real key or provider
     env.update({"LIVE_JUDGMENT_LOG": str(log), **env_extra})
     done = subprocess.run([sys.executable, str(SCRIPTS / "live_judgment.py"), *args], env=env, cwd=ROOT, capture_output=True,
                           text=True, timeout=240)
@@ -301,3 +301,73 @@ def test_the_dry_run_describes_the_new_requirements(tmp_path):
     assert code == 0 and "--allow-live" in out
     code, out = run_cli(["--planner", "--dry-run"], {}, tmp_path / "log.jsonl")
     assert code == 0 and "attests every HTTP request" in out and not (tmp_path / "log.jsonl").exists()
+
+
+# -- D27/D29: the record names its provider, and closes_gap is provider-gated -----------------------------------------------------------------------
+
+@pytest.mark.parametrize("provider_env,provider", [({}, "anthropic"), ({"PROVIDER_NAME": "ollama"}, "ollama"),
+                                                   ({"PROVIDER_NAME": "openrouter", "PROVIDER_API_KEY": "k-or"}, "openrouter")])
+def test_every_record_names_its_provider_and_a_mock_pass_closes_nothing_whichever_it_is(provider_env, provider, tmp_path):
+    log = tmp_path / "log.jsonl"
+    code, out = run_cli(["--planner", "--mock-transport"], {"ANTHROPIC_API_KEY": MOCK_KEY, **provider_env}, log)
+    assert code == 0, out
+    r = last_record(log)
+    assert r["result"] == "pass" and r["provider"] == provider and r["provider_host"]
+    assert r["real"] is False and r["closes_gap"] is None, "a mock pass is real: false, so it closes nothing, for any provider"
+    assert (r["provider_host"] == _HOST) is (provider == "anthropic")
+
+
+def test_a_skipped_record_also_names_its_provider_and_closes_nothing(tmp_path):
+    log = tmp_path / "log.jsonl"
+    code, out = run_cli(["--planner"], {"PROVIDER_NAME": "ollama"}, log)
+    assert code == 2, out  # no ANTHROPIC_API_KEY: the harness stays Anthropic-keyed (the ceremony's key rule is unchanged)
+    r = last_record(log)
+    assert r["result"] == "skipped" and r["provider"] == "ollama" and r["closes_gap"] is None
+
+
+@pytest.mark.parametrize("sub,provider,host,result,real,expect", [
+    ("planner", "anthropic", _HOST, "pass", True, "C24"), ("doc", "anthropic", _HOST, "pass", True, "C25"),
+    ("apply", "anthropic", _HOST, "pass", True, "C27"),
+    ("planner", "ollama", "localhost", "pass", True, None), ("doc", "openrouter", "openrouter.ai", "pass", True, None),
+    ("apply", "freellmpool", "pool.test", "pass", True, None), ("planner", "ollama", "localhost", "pass", False, None),
+    ("planner", "anthropic", _HOST, "pass", False, None), ("planner", "anthropic", _HOST, "fail", True, None),
+    ("planner", "anthropic", _HOST, "skipped", True, None),
+    ("planner", "anthropic", "gateway.example.test", "pass", True, None),  # a proxy named "anthropic" is not the production host
+    ("planner", "unknown", "", "pass", True, None), ("planner", None, None, "pass", True, None),
+    ("live_apis", "ollama", "localhost", "pass", True, "C26"),  # the third-party-API row does not involve an LLM provider
+    ("live_apis", "anthropic", _HOST, "pass", False, None), ("live_apis", "anthropic", _HOST, "skipped", True, None),
+])
+def test_closes_gap_is_the_row_only_for_a_real_anthropic_pass(sub, provider, host, result, real, expect):
+    sys.path.insert(0, str(SCRIPTS))
+    try:
+        from live_judgment import closes_gap
+    finally:
+        sys.path.remove(str(SCRIPTS))
+    assert closes_gap(sub, provider, host, result, real) == expect
+
+
+@pytest.mark.parametrize("env_extra,mock,result,real,expect_provider,expect_closes", [
+    ({}, False, "pass", True, "anthropic", "C24"),
+    ({"PROVIDER_NAME": "ollama"}, False, "pass", True, "ollama", None),
+    ({"PROVIDER_NAME": "openrouter"}, False, "pass", True, "openrouter", None),
+    ({"PROVIDER_NAME": "anthropic", "PROVIDER_BASE_URL": "https://gateway.example.test"}, False, "pass", True, "anthropic", None),
+    ({"PROVIDER_NAME": "mystery"}, False, "pass", True, "unknown", None),
+    ({}, True, "pass", True, "anthropic", None),
+    ({}, False, "fail", True, "anthropic", None),
+    ({}, False, "pass", False, "anthropic", None),
+])
+def test_the_record_the_harness_writes_carries_the_provider_and_the_provider_gated_closes_gap(
+        tmp_path, env_extra, mock, result, real, expect_provider, expect_closes):
+    import io
+    sys.path.insert(0, str(SCRIPTS))
+    try:
+        import live_judgment as lj
+    finally:
+        sys.path.remove(str(SCRIPTS))
+    log = tmp_path / "log.jsonl"
+    ctx = lj._Ctx({"LIVE_JUDGMENT_LOG": str(log), **env_extra}, io.StringIO(), io.StringIO())
+    ctx.mock = mock
+    lj._record(ctx, "planner", result, "ok", 0 if result == "pass" else 1, real=real)
+    r = last_record(log)
+    assert r["provider"] == expect_provider and r["closes_gap"] == expect_closes
+    assert r["real"] is (real and not mock) and r["result"] == result

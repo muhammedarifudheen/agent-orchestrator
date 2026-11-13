@@ -55,7 +55,7 @@ def repo_log_untouched():
 
 def clean_env(tmp_path, **extra) -> dict:
     env = {k: v for k, v in os.environ.items()
-           if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "LIVE_TESTS", "LIVE_JUDGMENT_LOG")}
+           if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "LIVE_TESTS", "LIVE_JUDGMENT_LOG") and not k.startswith("PROVIDER_")}
     env["LIVE_JUDGMENT_LOG"] = str(tmp_path / "lj.jsonl")
     env.update(extra)
     return env

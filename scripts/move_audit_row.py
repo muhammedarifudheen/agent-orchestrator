@@ -9,7 +9,10 @@ of .perf/live_judgment.jsonl, named by (a prefix of) its SHA-256 (live_judgment.
 
 A row moves ONLY when ALL of these hold; the first that does not hold refuses with `REFUSED (<NAME>): <reason>`:
   17 MOCK              the record is not from the offline mock (a mock run can never close a gap)
-  11 NOT_REAL          real is true: attested over the real transport (scripts/live_attest.py), not merely asserted
+  19 PROVIDER          closes_gap is provider-gated (D27/D29): for the Claude-specific rows C24, C25, C27 the record's provider must be
+                       `anthropic` (checked here, before anything else), and later closes_gap must equal the row and be what the
+                       record's own provider, host, result and real imply. A non-Anthropic pass is recorded and moves nothing
+  11 NOT_REAL         real is true: attested over the real transport (scripts/live_attest.py), not merely asserted
   12 NOT_PASS          result is pass and the exit code is 0
   16 WRONG_SUBCOMMAND  the record is from the subcommand that closes this row
   13 STALE             the run is at most 30 minutes old: a historical record is not evidence. There is no option to
@@ -22,7 +25,7 @@ A row moves ONLY when ALL of these hold; the first that does not hold refuses wi
                        matches the repo; if a test file or a file it exercises was edited, deleted or added since, the run
                        attested code that is no longer there, and the refusal names the files
   15 ROW_NOT_OPEN      the row is still in section 3a (a row already moved is not moved twice)
-  19 DIRTY_AUDIT       (with --apply and committing) AUDIT.md has no uncommitted changes and nothing else is staged
+  23 DIRTY_AUDIT       (with --apply and committing) AUDIT.md has no uncommitted changes and nothing else is staged
   10 NO_RECORD         the hash names exactly one record in the log
 On success it prints the diff, removes the row from 3a, adds it to `### 2b. Proven live` (the record hash, date, command and the
 evidence hash), and commits `audit: close live judgment gap <row> (<first 12 hex of the hash>)` (the full hash and the evidence
@@ -52,7 +55,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 ROWS = {"C24": "planner", "C25": "doc", "C27": "apply", "C26": "live_apis"}
 FRESH_MINUTES = 30
 CODES = {"NO_RECORD": 10, "NOT_REAL": 11, "NOT_PASS": 12, "STALE": 13, "EVIDENCE_MISMATCH": 14, "ROW_NOT_OPEN": 15,
-         "WRONG_SUBCOMMAND": 16, "MOCK": 17, "CODE_CHANGED": 18, "DIRTY_AUDIT": 19}
+         "WRONG_SUBCOMMAND": 16, "MOCK": 17, "CODE_CHANGED": 18, "PROVIDER": 19, "DIRTY_AUDIT": 23}  # 20-22 are the ceremony's own
 EXIT_OK, EXIT_USAGE = 0, 64
 MIN_HASH = 12
 HEADING_2B = "### 2b. Proven live"
@@ -107,9 +110,14 @@ def _sha256_file(path: str | Path | None) -> str | None:
 
 def check_record(row: str, record: dict[str, Any], now: dt.datetime, code_root: Path = ROOT) -> None:
     """Raise Refusal unless the record can close `row`. The ORDER is part of the contract: mock and not-real first."""
+    from live_judgment import closes_gap
+
     sub = ROWS[row]
     if record.get("mock") is True:
         raise Refusal("MOCK", "the record is from the offline mock: a mock run can never close a gap")
+    if row != "C26" and record.get("provider") != "anthropic":
+        raise Refusal("PROVIDER", f"the record's provider is {record.get('provider')!r}: {row} is a Claude-specific gap and only an "
+                      "Anthropic run closes it. A pass through another provider is recorded (AUDIT.md section 7) but moves no row")
     if record.get("real") is not True:
         raise Refusal("NOT_REAL", f"real is {record.get('real')!r}: only a run attested over the real transport (a real key for "
                       "planner/doc, a public upstream with --allow-live for apply) is real; a skipped, loopback, wrong-key or "
@@ -119,6 +127,11 @@ def check_record(row: str, record: dict[str, Any], now: dt.datetime, code_root: 
                       f"(exit 0) closes a gap. Reason recorded: {str(record.get('reason'))[:200]}")
     if record.get("subcommand") != sub:
         raise Refusal("WRONG_SUBCOMMAND", f"row {row} is closed by --{sub}, but this record is from --{record.get('subcommand')}")
+    derived = closes_gap(sub, record.get("provider"), record.get("provider_host"), record.get("result"), record.get("real") is True)
+    if record.get("closes_gap") is None or record.get("closes_gap") != row or derived != record.get("closes_gap"):
+        raise Refusal("PROVIDER", f"the record's closes_gap is {record.get('closes_gap')!r}, not {row!r} (re-derived from provider "
+                      f"{record.get('provider')!r} at {record.get('provider_host')!r}, result and real: {derived!r}). A record with no "
+                      "closes_gap, with another row's, or with one its own fields do not support, closes nothing")
     try:
         age = now - _parse_date(str(record.get("date")))
     except ValueError:

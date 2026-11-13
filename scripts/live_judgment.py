@@ -82,17 +82,43 @@ EXIT_USAGE = 64
 
 KEY_MISSING_MESSAGE = "ANTHROPIC_API_KEY absent; to close this gap, set the key and re-run"
 SUBCOMMANDS = ("planner", "doc", "apply", "live_apis")
-def _production_host() -> str:
+def _load_provider_config() -> Any:
     import importlib.util
 
     spec = importlib.util.spec_from_file_location("_lj_provider_config", ROOT / "agent" / "provider_config.py")
     module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
     sys.modules[spec.name] = module  # a dataclass resolves its string annotations through sys.modules
     spec.loader.exec_module(module)  # type: ignore[union-attr]
-    return module.ANTHROPIC_HOST
+    return module
 
 
-ANTHROPIC_HOST = _production_host()  # the production endpoint (agent/provider_config.py); `real` for planner/doc means requests to it were attested
+_PROVIDER_CONFIG = _load_provider_config()
+ANTHROPIC_HOST = _PROVIDER_CONFIG.ANTHROPIC_HOST  # the production endpoint (agent/provider_config.py); `real` for planner/doc means requests to it were attested
+
+#: the AUDIT row each subcommand can close. C24, C25 and C27 are CLAUDE-SPECIFIC; C26 (third-party APIs) does not involve an LLM.
+GAP_ROW = {"planner": "C24", "doc": "C25", "apply": "C27", "live_apis": "C26"}
+
+
+def provider_identity(env: Mapping[str, str]) -> tuple[str, str]:
+    """(provider, provider host) of this run's environment; ("unknown", "") when PROVIDER_NAME is not a supported provider."""
+    try:
+        return _PROVIDER_CONFIG.identity(env)
+    except _PROVIDER_CONFIG.ProviderConfigError:
+        return "unknown", ""
+
+
+def closes_gap(sub: str, provider: Any, provider_host: Any, result: Any, real: bool) -> str | None:
+    """The row a record may close, or None. D27: closes_gap is provider-gated. For the Claude-specific rows (C24, C25, C27) it is the
+    row only if the provider is `anthropic` AND it was the production Anthropic host (a proxy named "anthropic" does not count) AND the
+    result is a pass AND the run is attested real. Any other provider's pass is recorded and closes nothing. The third-party-API row
+    (C26) does not depend on an LLM provider, so only pass and real matter for it."""
+    if result != "pass" or real is not True:
+        return None
+    if sub == "live_apis":
+        return GAP_ROW["live_apis"]
+    if provider != "anthropic" or provider_host != ANTHROPIC_HOST:
+        return None
+    return GAP_ROW.get(sub)
 
 # The EXISTING live-gated tests. Entries with the same `select` run in one pytest invocation. These are selections of
 # test ids, never copies of an assertion.
@@ -604,9 +630,13 @@ def _record(ctx: _Ctx, sub: str, result: str, reason: str, code: int, *, real: b
         sidecar = _run_dir(ctx) / f"{ctx.stamp}_{sub}.manifest.json"
         code_fields = {"repo_hash": repo_hash.digest(ctx.manifest), "repo_manifest_path": str(sidecar),
                        "repo_manifest_sha256": repo_hash.write_sidecar(sidecar, ctx.manifest)}
+    final_real = bool(real) and not ctx.mock
+    provider, provider_host = provider_identity(ctx.env)
     line = append_record(log_path(ctx.env), {
         "date": _now().isoformat(), "subcommand": sub, "key_present": bool(ctx.key), "result": result,
-        "reason": _redact(reason, ctx.env), "exit_code": code, "real": bool(real) and not ctx.mock, "mock": ctx.mock,
+        "provider": provider, "provider_host": provider_host,
+        "closes_gap": closes_gap(sub, provider, provider_host, result, final_real),
+        "reason": _redact(reason, ctx.env), "exit_code": code, "real": final_real, "mock": ctx.mock,
         "allow_live": ctx.allow_live, "artifact_path": artifact, "artifact_sha256": _sha256_file(artifact),
         "attestation": attestation, "tests": tests or [], "upstream": upstream, **code_fields})
     ctx.out(f"RECORD_HASH: {record_hash(line)}")

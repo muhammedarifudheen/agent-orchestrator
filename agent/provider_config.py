@@ -94,6 +94,14 @@ def resolve_model(env: Mapping[str, str] | None = None) -> str:
     return _model(_name(env), env)
 
 
+def identity(env: Mapping[str, str] | None = None) -> tuple[str, str]:
+    """(provider name, base-URL host) of the configured provider, without needing a key: what an audit record says it talked to."""
+    env = os.environ if env is None else env
+    name = _name(env)
+    url = (env.get("PROVIDER_BASE_URL") or DEFAULT_BASE_URLS[name] or "").strip()
+    return name, urlparse(url).hostname or ""
+
+
 def headers_for(name: str, base_url: str, key: str) -> dict[str, str]:
     if name == "anthropic":
         return {"x-api-key": key}

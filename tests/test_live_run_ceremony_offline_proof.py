@@ -21,7 +21,7 @@ SCRIPTS = ROOT / "scripts"
 
 
 def clean_env() -> dict[str, str]:
-    return {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "LIVE_"))}
+    return {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "LIVE_", "PROVIDER_"))}
 
 
 def sha(path: Path) -> str | None:
@@ -85,15 +85,23 @@ def test_the_repo_is_untouched_by_the_offline_ceremony(ceremony):
     assert ceremony["status_after"] == ceremony["status_before"], "the offline ceremony changed the working tree"
 
 
-def test_forged_flags_on_the_mock_records_do_not_get_a_row_moved(ceremony, tmp_path):
-    """The cheat: rewrite mock/real in the mock records and ask move_audit_row to move the rows. The evidence re-check (attestation,
-    upstream, allow_live) must still refuse, because a flag is not evidence."""
+ROW_OF = {"planner": "C24", "doc": "C25", "apply": "C27"}
+
+
+@pytest.mark.parametrize("also_forge_closes_gap,code,name", [(False, 19, "PROVIDER"), (True, 14, "EVIDENCE_MISMATCH")],
+                         ids=["flags only", "flags and closes_gap"])
+def test_forged_flags_on_the_mock_records_do_not_get_a_row_moved(ceremony, tmp_path, also_forge_closes_gap, code, name):
+    """The cheat: rewrite mock/real in the mock records and ask move_audit_row to move the rows. Forging only the flags is caught by the
+    provider gate (closes_gap is re-derived from the record's own fields); a forger who ALSO writes closes_gap gets past it and is
+    still refused by the evidence re-check (attestation, upstream, allow_live), because a flag is not evidence."""
     recs = ceremony["records"][-3:]
     log = tmp_path / "forged.jsonl"
     hashes = {}
     with log.open("w", encoding="utf-8", newline="\n") as fh:
         for r in recs:
             forged = dict(r, mock=False, real=True)
+            if also_forge_closes_gap:
+                forged["closes_gap"] = ROW_OF[r["subcommand"]]
             line = json.dumps(forged, sort_keys=True)
             fh.write(line + "\n")
             hashes[r["subcommand"]] = hashlib.sha256(line.encode()).hexdigest()
@@ -103,8 +111,8 @@ def test_forged_flags_on_the_mock_records_do_not_get_a_row_moved(ceremony, tmp_p
         done = subprocess.run([sys.executable, str(SCRIPTS / "move_audit_row.py"), "--row", row, "--apply", "--record-hash", hashes[sub],
                                "--log", str(log), "--audit", str(audit_copy), "--no-commit"],
                               cwd=ROOT, env=clean_env(), capture_output=True, text=True, timeout=120)
-        assert done.returncode == 14, (row, done.stdout)
-        assert "REFUSED (EVIDENCE_MISMATCH)" in done.stdout
+        assert done.returncode == code, (row, done.stdout)
+        assert f"REFUSED ({name})" in done.stdout
     assert audit_copy.read_text(encoding="utf-8") == (ROOT / "AUDIT.md").read_text(encoding="utf-8"), "a forged record edited the audit"
 
 
@@ -149,8 +157,19 @@ def test_the_three_rows_are_each_in_exactly_one_place_and_none_moved_without_a_l
 def test_section_6_lists_exactly_the_open_rows_that_remain_after_the_ceremony():
     text = audit_text()
     a3 = rows_in(section(text, "### 3a.", "### 3b."))
-    s6 = section(text, "## 6. WHAT IS LEFT AFTER THE CEREMONY", None)
+    s6 = section(text, "## 6. WHAT IS LEFT AFTER THE CEREMONY", "## 7.")  # section 7 follows; it is not part of this list
     listed = set(re.findall(r"\bC\d+\b", s6.split("\n", 1)[1]))
     remaining = (a3 | rows_in(section(text, "\n### 2b.", "\n## 3.") if has_2b(text) else "")) - {"C24", "C25", "C27"}
     assert listed == remaining, f"section 6 lists {sorted(listed)} but the rows left are {sorted(remaining)}"
     assert "three rows move from" in s6 and "Nothing else changes" in s6
+
+
+def test_section_7_records_the_free_provider_runs_and_says_they_close_nothing():
+    text = audit_text()
+    s7 = section(text, "## 7. FREE-PROVIDER WIRING VERIFICATION", None)
+    assert ("These runs prove the harness and clients work end-to-end. They do NOT close C24/C25/C27, which are Claude-specific. "
+            "Those remain in §3a until an Anthropic run passes.") in s7
+    table = [ln for ln in s7.splitlines() if ln.startswith("| ")]
+    assert table[0].startswith("| Provider |") and {ln.split("|")[1].strip() for ln in table[1:]} >= {"ollama", "freellmpool", "openrouter"}
+    # the three Claude-specific rows are still open in 3a, so the sentence is true as written
+    assert {"C24", "C25", "C27"} <= rows_in(section(text, "### 3a.", "### 3b."))

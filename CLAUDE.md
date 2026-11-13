@@ -666,7 +666,7 @@ implemented them. Change them here first, then in code.
   plan without a key. `move_audit_row.py` is the ONLY way a row leaves AUDIT.md section 3a: it checks, in this order, MOCK (17), NOT_REAL (11),
   NOT_PASS (12), WRONG_SUBCOMMAND (16), STALE (13: the record is at most 30 minutes old; no option extends it), EVIDENCE_MISMATCH (14: a record with no code attestation, or whose manifest sidecar is missing or does not hash to the recorded value, is a mismatch too; the artifact
   exists and hashes to what the record says; planner/doc: the junit report is re-classified and must be a pass with the recorded test count and a
-  key present; apply: a public upstream, `--allow-live`, attested answers), CODE_CHANGED (18, see below), ROW_NOT_OPEN (15), DIRTY_AUDIT (19: renumbered from 18 when CODE_CHANGED took 18) and NO_RECORD (10); then removes the row
+  key present; apply: a public upstream, `--allow-live`, attested answers), CODE_CHANGED (18, see below), ROW_NOT_OPEN (15), DIRTY_AUDIT (23: it was 18, then 19, and moved when CODE_CHANGED and PROVIDER took those; 20-22 are the ceremony's own refusals) and NO_RECORD (10); PROVIDER (19) is checked right after MOCK, see PROVIDER GATE below; then removes the row
   from 3a, adds it to a new `### 2b. Proven live` table (record hash, date, command, evidence hash) and commits
   `audit: close live judgment gap <row> (<first 12 hex of the record hash>)` with the full hash and the evidence hash in the body, one commit per
   row. Interpretation recorded: the brief said move_audit_row must re-verify "with a fresh live run"; a second paid run would add cost and no
@@ -693,6 +693,19 @@ implemented them. Change them here first, then in code.
   third-party packages in .venv, the Python version and the remote services. A bug found and fixed while building it: relative imports were
   encoded with ":" as separator, which broke on Windows drive letters and silently dropped files reached by a relative import from the closure
   (caught by `test_the_manifest_is_the_import_closure_plus_the_data_globs_and_nothing_else`).
+  PROVIDER GATE (D29 follow-up): closes_gap is provider-gated; a non-Anthropic pass is recorded but cannot move an audit row. Every record
+  carries `provider` (anthropic | ollama | freellmpool | openrouter, from `agent/provider_config.py`; `unknown` for an unsupported PROVIDER_NAME),
+  `provider_host` and `closes_gap`. `closes_gap` is the row id (C24 planner, C25 doc, C27 apply) ONLY if the provider is `anthropic` AND its host is
+  the production Anthropic host (a proxy named "anthropic" does not count) AND the result is `pass` AND `real` is true; for any other provider it is
+  null, even on a pass. `move_audit_row.py` refuses with PROVIDER (exit 19, REFUSED_PROVIDER): first, right after the mock check and BEFORE
+  NOT_REAL (so a real Ollama pass is told its provider is the reason, not that it is "not real"), when a Claude-specific row is asked for with a
+  record whose provider is not `anthropic`; and again after WRONG_SUBCOMMAND when `closes_gap` is null, names another row, or is not what the
+  record's own provider, host, result and real imply (a forged `closes_gap` is caught by re-deriving it with the same function the harness uses,
+  `live_judgment.closes_gap`). C26 (the five third-party APIs, D28) involves no LLM provider, so it is NOT provider-gated: its `closes_gap` is
+  `C26` for any real pass; this is a deviation from a literal reading of "only if provider == anthropic", chosen because the row says nothing
+  about Claude. Records written before this change have no `provider` and can never move a row. Exit 19 replaces DIRTY_AUDIT's 19 (now 23).
+  Free-provider runs are listed in AUDIT.md section 7 (empty: none has run; the harness's key precondition and the contract tests' gate are still
+  ANTHROPIC_API_KEY-keyed, so they cannot be started through `live_judgment.py` yet).
   MEASURED FRESHNESS WINDOW. The offline ceremony (three subcommands on mocks plus three move attempts, `--offline-mock`) took 38 s wall-clock
   (2026-11-13, 08:49:21Z to 08:49:59Z; measured, not estimated). That is under 10 minutes, so the 30-minute window is KEPT, not raised: the
   oldest record is about half a minute old when its row moves. Real-run time is bounded by network latency on three subcommands; measured
