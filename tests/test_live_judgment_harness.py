@@ -22,6 +22,7 @@ import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from agent.provider_config import ANTHROPIC_HOST as _HOST
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -474,7 +475,7 @@ def test_wire_probe_goes_through_the_production_client_with_the_key_redacted(kin
     assert calls["init"] >= 1 and calls["create"] >= 1, "the probe did not use the production AnthropicHTTP / Messages.create"
     assert any(t is not None for t in calls["transports"]), "the probe must inject a capturing transport, not the network"
     assert probe["method"] == "POST"
-    assert probe["url"].endswith("/v1/messages") and "api.anthropic.com" in probe["url"]
+    assert probe["url"].endswith("/v1/messages") and _HOST in probe["url"]
     hdrs = {k.lower(): v for k, v in probe["headers"].items()}
     assert "anthropic-version" in hdrs
     assert "x-api-key" in hdrs and key not in hdrs["x-api-key"] and hdrs["x-api-key"]

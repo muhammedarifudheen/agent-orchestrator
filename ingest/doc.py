@@ -13,16 +13,15 @@ Grounding caps (final confidence = min(model confidence, all caps); never raised
 """
 from __future__ import annotations
 
-import os
 import re
 from typing import Any, Protocol
 
+from agent import provider_config
 from ingest.anthropic_http import AnthropicAPIError, AnthropicHTTP
 from ingest.common import (invalid_argument_example, make_operation, make_param, make_spec,
                            normalize_path, ok_example, snake)
 
 TOOL_NAME = "report_api"
-DEFAULT_MODEL = os.environ.get("AGENT_MODEL", "claude-sonnet-5-5")
 SUPPORTED_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")  # what specs/schema.json allows
 
 CAP_EVIDENCE = 0.3
@@ -142,7 +141,7 @@ class MessagesDocClient:
     name = "messages"
 
     def __init__(self, client: Any, model: str | None = None) -> None:
-        self._client, self._model = client, model or DEFAULT_MODEL
+        self._client, self._model = client, model or provider_config.resolve_model()  # PROVIDER_MODEL (D29)
 
     def extract(self, text: str, *, strict: bool = False) -> dict[str, Any]:
         return _call_model(self._client, self._model, text, strict)

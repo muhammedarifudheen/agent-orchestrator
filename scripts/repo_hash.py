@@ -30,7 +30,7 @@ from typing import Any, Iterable
 ROOT = Path(__file__).resolve().parent.parent
 SEARCH_DIRS = ("", "servers", "tests", "tests/scenarios", "scripts")  # where an import is looked for, relative to the code root
 HARNESS = ("scripts/live_judgment.py", "scripts/live_attest.py", "scripts/live_attest_site/sitecustomize.py",
-           "scripts/repo_hash.py")
+           "scripts/repo_hash.py", "agent/provider_config.py")  # the last is loaded by path (it names the production host)
 COMMON_DATA = ("pytest.ini",)
 SKIP_PARTS = {"__pycache__", ".venv", ".git", ".perf"}
 REL = "\0"  # marks a relative import inside the name set; NUL cannot appear in a file path (":" can, on Windows)

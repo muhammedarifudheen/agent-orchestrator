@@ -714,6 +714,30 @@ implemented them. Change them here first, then in code.
   outages are not the ceremony's failure. Not run: this package did not send a real request to any of the five APIs (the 14 tests were proven
   runnable against a loopback stand-in, recorded `real: false`).
 
+- D29. The planner and doc clients are provider-agnostic; Anthropic is the default, Ollama/freellmpool/OpenRouter are supported for free-tier development.
+  `agent/provider_config.py` is the one place that decides where a planner or doc-extraction request goes and how it authenticates; the
+  request body is unchanged (Anthropic Messages format), so `ClaudePlanner` and `HttpDocExtractionClient` run against any provider with
+  environment variables only. Settings: `PROVIDER_NAME` (anthropic | ollama | freellmpool | openrouter, default anthropic), `PROVIDER_BASE_URL`
+  (default Anthropic's production URL; Ollama `http://localhost:11434`; OpenRouter `https://openrouter.ai/api`; freellmpool none), `PROVIDER_API_KEY`
+  (default for anthropic ONLY: `ANTHROPIC_API_KEY`), `PROVIDER_MODEL` (anthropic: `AGENT_MODEL` or `claude-sonnet-5-5`; ollama `qwen3-coder`;
+  openrouter `openrouter/free`; freellmpool none) and the headers derived from them (anthropic `x-api-key`; Ollama on a local URL `x-api-key:
+  ollama` with no real key; Ollama on any other URL, i.e. cloud, and OpenRouter and freellmpool `Authorization: Bearer`); an optional
+  `PROVIDER_HEADERS` JSON object is merged on top. Nothing is read at import: it is resolved when a client is built, and a required variable that is
+  missing is a `ProviderConfigError` naming it (the clients surface it as the same `AnthropicAPIError` / `IngestError` as before: `no_api_key`,
+  "ANTHROPIC_API_KEY is not set", the D16 `ANTHROPIC_AUTH_TOKEN` message), and nothing is sent. A key is never borrowed across providers: with
+  `PROVIDER_NAME=openrouter` and only `ANTHROPIC_API_KEY` set the client refuses to start. The production host is written in exactly one Python
+  file (this module; a test greps for it). `scripts/live_attest.py` and `scripts/live_judgment.py` take their production host from it (loaded by
+  path), and `agent/provider_config.py` is part of every record's `repo_hash` (D27); so a run through another provider is attested against the
+  Anthropic host, finds no request to it, and is `real: false` BY CONSTRUCTION (D26): a free-tier pass can never close C24 or C25. This supersedes
+  the clause in D25 (5) that said no base URL option exists in `ingest/` or `agent/`: the option now exists, only through this module, and the
+  attestation is what keeps it from counting as proof about the real Claude. Deviations from the brief, recorded: (a) the Anthropic default model
+  stays `claude-sonnet-5-5` (what the code has used), not `claude-3-5-sonnet-latest`; changing the model a gap-closing run attests is a decision
+  for the person running it, via `PROVIDER_MODEL`. (b) freellmpool has no known endpoint or model here, so its URL and model are REQUIRED, and its
+  key (sent as a bearer token if set) is optional. (c) `PROVIDER_HEADERS` is derived, with an optional JSON override, so a provider with an unusual
+  scheme needs no code change. NOT PROVEN (AUDIT.md C58): no request has been sent to Ollama, freellmpool or OpenRouter; the default URLs and header
+  schemes of the first and last come from their documented Anthropic-compatible endpoints, not from a call, and a free-tier model's tool-calling
+  quality is unmeasured. The orchestrator's own loop (`agent/orchestrator.py`, which takes an injected SDK-shaped client) is not part of this change.
+
 ## Architecture: genericity
 
 Goal: a pipeline that turns ANY reachable system into tools with the same contract, without a

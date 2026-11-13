@@ -14,6 +14,7 @@ import json
 import subprocess
 from pathlib import Path
 
+from agent.provider_config import ANTHROPIC_HOST as _HOST
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -93,7 +94,7 @@ class Lab:
         else:
             art = self.tmp / f"{self.n}_{sub}.xml"
             art.write_text(artifact_text or junit(6 if sub == "planner" else 1), encoding="utf-8")
-            att = {"host": "api.anthropic.com", "real": True, "real_requests": 4, "non_real_requests": 0}
+            att = {"host": _HOST, "real": True, "real_requests": 4, "non_real_requests": 0}
             base = {"key_present": True, "upstream": None, "allow_live": False,
                     "tests": [f"tests/t.py::test_{i}" for i in range(6 if sub == "planner" else 1)]}
         man = repo_hash.manifest(["tests/test_a.py"], ["servers/*.py"], self.code, harness=())

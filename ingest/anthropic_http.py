@@ -12,14 +12,14 @@ Not verified against the live API in this repo (no key): the request/response sh
 """
 from __future__ import annotations
 
-import os
 from types import SimpleNamespace
 from typing import Any
 
 import httpx
 
+from agent import provider_config
+
 API_VERSION = "2023-06-01"
-DEFAULT_BASE_URL = "https://api.anthropic.com"
 
 
 class AnthropicAPIError(RuntimeError):
@@ -47,7 +47,7 @@ class _Messages:
     def create(self, **body: Any) -> Any:
         owner = self._owner
         resp = owner._http.post("/v1/messages", json=body, headers={
-            "x-api-key": owner._api_key, "anthropic-version": API_VERSION, "content-type": "application/json"})
+            **owner.config.headers, "anthropic-version": API_VERSION, "content-type": "application/json"})
         try:
             data = resp.json()
         except ValueError:
@@ -61,16 +61,15 @@ class _Messages:
 
 
 class AnthropicHTTP:
-    def __init__(self, api_key: str | None = None, *, base_url: str = DEFAULT_BASE_URL,
+    def __init__(self, api_key: str | None = None, *, base_url: str | None = None,
                  transport: httpx.BaseTransport | None = None, timeout: float = 120.0) -> None:
-        key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-        if not key:
-            if os.environ.get("ANTHROPIC_AUTH_TOKEN"):
-                # The SDK accepted this variable (sent as a bearer token); this client sends `x-api-key` only. Failing to
-                # authenticate silently would be worse than refusing to start, so say exactly what to do.
-                raise AnthropicAPIError(0, "unsupported_auth_token",
-                                        "ANTHROPIC_AUTH_TOKEN is set but no longer supported; set ANTHROPIC_API_KEY.")
-            raise AnthropicAPIError(0, "no_api_key", "ANTHROPIC_API_KEY is not set")
-        self._api_key = key  # never logged, never put in an error message
-        self._http = httpx.Client(base_url=base_url, transport=transport, timeout=timeout)
+        # Where the request goes and how it authenticates comes from agent/provider_config.py (PROVIDER_* variables;
+        # Anthropic by default). An explicit api_key or base_url wins. A missing key is refused HERE, before any request:
+        # the SDK accepted ANTHROPIC_AUTH_TOKEN as a bearer token, this client does not, and failing to authenticate
+        # silently would be worse than refusing to start, so the error says exactly what to do.
+        try:
+            self.config = provider_config.resolve(api_key=api_key, base_url=base_url)
+        except provider_config.ProviderConfigError as exc:
+            raise AnthropicAPIError(0, exc.code, str(exc)) from None
+        self._http = httpx.Client(base_url=self.config.base_url, transport=transport, timeout=timeout)
         self.messages = _Messages(self)

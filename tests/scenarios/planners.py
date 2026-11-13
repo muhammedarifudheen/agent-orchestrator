@@ -17,10 +17,10 @@ no facts, no tool names from the scenario.
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from typing import Any, Protocol, Sequence
 
+from agent import provider_config
 from intent_llm import choose_tool
 
 
@@ -85,7 +85,7 @@ class ClaudePlanner:
 
     def __init__(self, client: Any = None, model: str | None = None) -> None:
         self._client = client
-        self._model = model or os.environ.get("AGENT_MODEL", "claude-sonnet-5-5")
+        self._model = model or provider_config.resolve_model()  # PROVIDER_MODEL; Anthropic's model by default (D29)
 
     def _ask(self, client: Any, payload: dict[str, Any], strict: bool) -> Any:
         try:

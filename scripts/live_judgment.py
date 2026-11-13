@@ -82,7 +82,17 @@ EXIT_USAGE = 64
 
 KEY_MISSING_MESSAGE = "ANTHROPIC_API_KEY absent; to close this gap, set the key and re-run"
 SUBCOMMANDS = ("planner", "doc", "apply", "live_apis")
-ANTHROPIC_HOST = "api.anthropic.com"  # the production endpoint; `real` for planner/doc means requests to it were attested
+def _production_host() -> str:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_lj_provider_config", ROOT / "agent" / "provider_config.py")
+    module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    sys.modules[spec.name] = module  # a dataclass resolves its string annotations through sys.modules
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    return module.ANTHROPIC_HOST
+
+
+ANTHROPIC_HOST = _production_host()  # the production endpoint (agent/provider_config.py); `real` for planner/doc means requests to it were attested
 
 # The EXISTING live-gated tests. Entries with the same `select` run in one pytest invocation. These are selections of
 # test ids, never copies of an assertion.

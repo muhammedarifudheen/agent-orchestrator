@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 from contextlib import contextmanager
 from pathlib import Path
@@ -25,7 +26,22 @@ from typing import Any, Iterator
 
 ENV_FILE = "LIVE_ATTEST_FILE"
 REAL_TRANSPORT = "httpx.HTTPTransport"  # how httpx names its own network transport (it re-exports its classes as `httpx.*`)
-ANTHROPIC_HOST = "api.anthropic.com"
+
+
+def _production_host() -> str:
+    """The production host, from the one place that names it (agent/provider_config.py), loaded by path: this module runs in
+    child processes through a sitecustomize, where the repo is not necessarily importable."""
+    import importlib.util
+
+    path = Path(__file__).resolve().parent.parent / "agent" / "provider_config.py"
+    spec = importlib.util.spec_from_file_location("_live_attest_provider_config", path)
+    module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    sys.modules[spec.name] = module  # a dataclass resolves its string annotations through sys.modules
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    return module.ANTHROPIC_HOST
+
+
+ANTHROPIC_HOST = _production_host()
 
 _LOCK = threading.Lock()
 _STATE: dict[str, Any] = {"path": None, "original": None}

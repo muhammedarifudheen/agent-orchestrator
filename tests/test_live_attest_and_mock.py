@@ -16,6 +16,7 @@ import threading
 from pathlib import Path
 
 import httpx
+from agent.provider_config import ANTHROPIC_HOST as _HOST
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -97,8 +98,8 @@ def test_a_request_over_the_real_transport_that_is_answered_2xx_attests_as_real(
 def test_a_mock_transport_can_never_attest_as_real_however_it_answers(tmp_path):
     f = tmp_path / "att.jsonl"
     with live_attest.attesting(f), httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={}))) as c:
-        c.get("https://api.anthropic.com/v1/messages")
-    att = live_attest.summarize(f, "api.anthropic.com")
+        c.get(f"https://{_HOST}/v1/messages")
+    att = live_attest.summarize(f, _HOST)
     assert att["real"] is False and att["real_requests"] == 0 and att["non_real_requests"] == 1
     assert att["transports"] == ["httpx.MockTransport"]
 
@@ -110,7 +111,7 @@ def test_the_offline_mock_transport_is_not_the_real_transport_and_attests_as_not
         client = AnthropicHTTP(MOCK_KEY)
         assert type(client._http._transport).__name__ == "OfflineAnthropicMock"
         client._http.post("/v1/messages", json={"tools": [], "messages": []})
-    att = live_attest.summarize(f, "api.anthropic.com")
+    att = live_attest.summarize(f, _HOST)
     assert att["real"] is False and att["non_real_requests"] == 1 and att["transports"] == ["live_mock.OfflineAnthropicMock"]
 
 
@@ -205,7 +206,7 @@ def test_the_mock_answers_a_planner_request_with_a_valid_plan_and_a_doc_request_
 
 def test_the_mock_refuses_a_request_it_has_no_canned_reply_for():
     t = live_mock.OfflineAnthropicMock()
-    r = t.handle_request(httpx.Request("POST", "https://api.anthropic.com/v1/messages", json={"tools": [{"name": "other"}], "messages": []}))
+    r = t.handle_request(httpx.Request("POST", f"https://{_HOST}/v1/messages", json={"tools": [{"name": "other"}], "messages": []}))
     assert r.status_code == 400 and "no canned reply" in r.text
 
 
@@ -249,7 +250,7 @@ def test_a_mock_run_passes_but_is_recorded_mock_true_real_false_with_the_key_pre
 
 def test_a_forged_attestation_file_in_the_environment_cannot_make_a_mock_run_real(tmp_path):
     forged = tmp_path / "forged.jsonl"
-    forged.write_text(json.dumps({"host": "api.anthropic.com", "transport": live_attest.REAL_TRANSPORT, "status": 200}) + "\n" * 1,
+    forged.write_text(json.dumps({"host": _HOST, "transport": live_attest.REAL_TRANSPORT, "status": 200}) + "\n" * 1,
                       encoding="utf-8")
     log = tmp_path / "log.jsonl"
     code, out = run_cli(["--planner", "--mock-transport"], {"ANTHROPIC_API_KEY": MOCK_KEY, "LIVE_ATTEST_FILE": str(forged)}, log)

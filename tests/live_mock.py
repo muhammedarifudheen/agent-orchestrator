@@ -69,7 +69,7 @@ def install() -> None:
         return
     original = ah.AnthropicHTTP.__init__
 
-    def init(self: Any, api_key: str | None = None, *, base_url: str = ah.DEFAULT_BASE_URL,
+    def init(self: Any, api_key: str | None = None, *, base_url: str | None = None,
              transport: httpx.BaseTransport | None = None, timeout: float = 120.0) -> None:
         original(self, api_key, base_url=base_url, transport=transport or OfflineAnthropicMock(), timeout=timeout)
 
