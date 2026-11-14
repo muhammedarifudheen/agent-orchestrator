@@ -807,6 +807,19 @@ implemented them. Change them here first, then in code.
   the duty library) and returns a registry VIEW, not a `ToolRegistry`; (c) the planner is called once per intent, not once with a filtered union (above);
   (d) filtering is opt-in for `ClaudePlanner` and the Orchestrator; (e) the keyword scoring moved, it was not copied.
 
+- D32. The audit distinguishes three claims, and AUDIT.md must keep them distinct: (a) the harness is proven by tests; (b) the wiring is proven against
+  free providers; (c) Claude's judgment is unproven without credits. They are different claims with different evidence. (a) is what sections 1 and 2 cite and
+  what the suite checks every run: the live-judgment harness, the attestation, the provider gate, the registry filter and the clients are exercised offline.
+  (b) is section 7: the Messages request shape is accepted by Ollama, `qwen3.5:4b` returns a parseable `tool_use`, the apply loop passes on a loopback
+  upstream, and the provider-gated refusal (exit 19) is correct; what it did NOT show is a planner within the CPU inference budget (with the full or a
+  filtered registry) or doc extraction within the client timeout. (c) is the three judgment rows still in section 3a (real planner, real doc extraction, the
+  learning loop against a real upstream failure): a pass through a free provider is `real: false` BY CONSTRUCTION (D26, D29) and can never be written as, or
+  counted toward, them. Chasing free-provider planner passes is closed as a line of work: the remaining gaps need Anthropic credits (the section 5 ceremony,
+  unchanged) or GPU inference (which would prove wiring on a real model and still not (c)). A separate known unknown, which Claude tier is minimally
+  sufficient, needs a model quality evaluation that does not exist (AUDIT.md section 3d). WHAT ENFORCES THIS, honestly: the provider gate (`move_audit_row.py`
+  exit 19, `closes_gap` null) and the audit tests that pin section 7's "close nothing" sentence and the three rows' place in 3a are tests; the wording
+  that keeps (a), (b) and (c) apart is a documentation rule held by this record and review, not by a test.
+
 ## Architecture: genericity
 
 Goal: a pipeline that turns ANY reachable system into tools with the same contract, without a
