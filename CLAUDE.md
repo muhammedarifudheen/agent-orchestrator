@@ -820,6 +820,36 @@ implemented them. Change them here first, then in code.
   exit 19, `closes_gap` null) and the audit tests that pin section 7's "close nothing" sentence and the three rows' place in 3a are tests; the wording
   that keeps (a), (b) and (c) apart is a documentation rule held by this record and review, not by a test.
 
+- D33. The ceremony's success path is proven offline, as the CLI, and every refusal is shown to fire on a tampered record.
+  `tests/test_move_audit_row_success.py` builds a throwaway git repo that MIRRORS the real one (every file the planner's code attestation names, AUDIT.md, CLAUDE.md, `scripts/`,
+  `agent/`, `learning/`; the mirror's `repo_hash` equals the real repo's, asserted), writes a synthetic `real: true` planner record from provider
+  `anthropic` into the mirror's `.perf/live_judgment.jsonl` (attested with the harness's own `repo_hash.for_subcommand`; `closes_gap` equals what
+  `live_judgment.closes_gap` derives, asserted) and runs `python scripts/move_audit_row.py --row C24 --apply --record-hash H` AS A SUBPROCESS, the
+  command the ceremony runs (`test_live_run_ceremony.py` asserts that exact argv against a fake runner; this runs it against the real script).
+  PROVEN: exit 0; C24 leaves 3a and arrives in 2b with the record's 12-hex hash; exactly one new commit, subject `audit: close live judgment gap C24 (<12
+  hex>)`, the full hash in its body; the commit touches AUDIT.md only; the diff is exactly the row move (the one 3a line removed, only the 2b block
+  added, the claim text unchanged); the sibling rows stay open; nothing is left uncommitted. No key, no network, no live call. WHAT IT ADDS: the
+  in-process success test in `tests/test_move_audit_row.py` already existed; this adds the CLI as a subprocess, a repo that carries the real code
+  attestation, and the exact-diff assertion.
+  THE TAMPERS (each record differs from the valid one in exactly one field, asserted; each is run through the CLI; each must exit with the code that
+  names it and leave AUDIT.md and the history untouched). Measured 2026-11-15: a1 `repo_hash` forged: exit 14 EVIDENCE_MISMATCH ("the code manifest does
+  not hash to the record's repo_hash"); a2 a test file edited AFTER the run (a consistent record, changed code): exit 18 CODE_CHANGED, naming
+  `tests/scenarios/test_planner_contract.py`; b `provider` -> ollama: exit 19 PROVIDER; c1 one request over a mock transport (`non_real_requests` 1):
+  exit 14; c2 attestation `real: false` with the record still `real: true`: exit 14; c3 `mock: true`: exit 17 MOCK; d `result` -> fail: exit 12 NOT_PASS;
+  plus a record edited after its hash was printed: exit 10 NO_RECORD. Two outcomes differ from what the brief expected and are recorded rather than
+  bent: (1) a FORGED `repo_hash` field is exit 14, not 18, because the check that the manifest hashes to the record's own `repo_hash` runs before
+  the comparison with the tree; 18 is what a real change to the attested code gives. (2) The record stores no transport name, only the attestation's
+  counts (`real`, `real_requests`, `non_real_requests`); "a mock transport" is therefore a non-zero `non_real_requests` or `real: false` (14), or the
+  `mock` flag (17).
+  THE TESTS ARE NOT A SOFT PATH, shown by breaking the script (2026-11-15, each restored): not removing the row from 3a, not committing, a subject without
+  the hash, no code-attestation check, no transport-attestation check, no mock check, no result check, no repo_hash/manifest consistency check, and both
+  provider checks removed were each CAUGHT, by the test that names them. One mutation SURVIVED and is not a gap: removing only the first PROVIDER check
+  changes nothing because the `closes_gap` re-derivation refuses the same record with the same code 19 (defence in depth); removing both is caught.
+  NOT PROVEN, and the line stays where it was: the records are built by the test in the real schema, not written by the live harness, and the junit
+  artifact is a stand-in; so the real Anthropic call is untested, and so is the harness writing a REAL record (its writing path runs only under the
+  offline mock, which is `real: false`). The ceremony script's own call into `move_audit_row.py` is tested with a fake runner (argv asserted), not
+  end to end.
+
 ## Architecture: genericity
 
 Goal: a pipeline that turns ANY reachable system into tools with the same contract, without a
