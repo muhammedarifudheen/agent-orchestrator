@@ -761,6 +761,19 @@ implemented them. Change them here first, then in code.
   use `provider_config.credentials_present()`, so a configured free provider unlocks them as ANTHROPIC_API_KEY does; the assertions are unchanged and the
   ids still skip without the environment. Records also carry `provider_model` (added during the run; the first Ollama record, `be0c06405af5`, predates it).
 
+- D30. A docs:/chore: commit that touches code paths fails the hygiene test; audit-trail integrity is enforced, not promised.
+  `tests/test_commit_hygiene.py` looks at the last 20 commits: one whose subject starts with `docs:` or `chore:` (also `docs(scope):`, `chore!:`) and
+  whose diff touches `scripts/`, `agent/`, `ingest/` or `learning/` fails the test, naming the commit and the files. Why: the message is what a maintainer
+  reads to decide what a commit can have changed; efdb147 ("docs: free-provider wiring run recorded; Claude gaps unchanged") also carried the harness
+  provider gate and the `provider_model` field. Disclosing that in a report did not fix the trail, so the rule is a test. History is NOT rewritten (a
+  commit may be cited elsewhere): a past mislabel is excused only by a line in `CHANGELOG.md` that STARTS with the commit's hash (7+ hex characters) and
+  says it "contained code changes ... behind a docs-only message", so the exception is itself part of the record; efdb147 is the one entry. The checker is
+  itself tested on throwaway repositories (it fails on a docs/chore commit touching each covered path, passes honest commits, excuses only the recorded
+  hash and only with the phrase, looks at 20 commits and the root commit). The path list is `CODE_PATHS` in the test. KNOWN LIMITS: `servers/`,
+  `generators/` and `specs/` are not covered (extend `CODE_PATHS` by a decision here); the rule polices labels `docs:` and `chore:` only (a `test:` or
+  `feat:` commit can change anything); only the last 20 commits are looked at, so a mislabel older than that is not re-found; without git history the test
+  skips with its reason.
+
 ## Architecture: genericity
 
 Goal: a pipeline that turns ANY reachable system into tools with the same contract, without a
