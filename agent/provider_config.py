@@ -102,6 +102,17 @@ def identity(env: Mapping[str, str] | None = None) -> tuple[str, str]:
     return name, urlparse(url).hostname or ""
 
 
+def credentials_present(env: Mapping[str, str] | None = None) -> bool:
+    """True if the configured provider could be used right now: the same rule `resolve` applies (a key where one is required, a base
+    URL and model where they have no default), without raising. The live-judgment harness and the live-gated tests use it to decide
+    whether a run may start, so a free provider configured through PROVIDER_* unlocks them exactly as ANTHROPIC_API_KEY does."""
+    try:
+        resolve(env)
+    except ProviderConfigError:
+        return False
+    return True
+
+
 def headers_for(name: str, base_url: str, key: str) -> dict[str, str]:
     if name == "anthropic":
         return {"x-api-key": key}

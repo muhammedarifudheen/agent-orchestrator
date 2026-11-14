@@ -751,6 +751,15 @@ implemented them. Change them here first, then in code.
   scheme needs no code change. NOT PROVEN (AUDIT.md C58): no request has been sent to Ollama, freellmpool or OpenRouter; the default URLs and header
   schemes of the first and last come from their documented Anthropic-compatible endpoints, not from a call, and a free-tier model's tool-calling
   quality is unmeasured. The orchestrator's own loop (`agent/orchestrator.py`, which takes an injected SDK-shaped client) is not part of this change.
+  FIRST WIRING RUN (2026-11-14, AUDIT.md section 7). Ollama on the build machine (CPU only). Findings: (i) the Messages request is accepted by
+  Ollama's `/v1/messages` (200, `x-api-key: ollama`) and parsed; (ii) `qwen3.5:4b` returns a real `tool_use` block, `qwen2.5-coder:7b` writes the call as
+  JSON text (a model-template incompatibility, handled by choosing the model, never by tuning the provider); (iii) planner and doc did not pass
+  (240 s step limit and 120 s client timeout, about 30-80 s even for a 2-tool request on CPU): the harness limits were NOT raised. The loop step
+  (`--apply`) passed on a loopback upstream, `real: false`. Every record has `closes_gap` null; `move_audit_row.py` refused C24, C25 and C27 with exit 19
+  and AUDIT.md was byte-identical afterwards. Harness change made for this run, recorded because it touches D25 (1) ("the harness only flips
+  LIVE_TESTS=1"): the key precondition of the harness and the skip gates of the live-gated contract tests (`claude_skip_reason`, `live_skip_reason`) now
+  use `provider_config.credentials_present()`, so a configured free provider unlocks them as ANTHROPIC_API_KEY does; the assertions are unchanged and the
+  ids still skip without the environment. Records also carry `provider_model` (added during the run; the first Ollama record, `be0c06405af5`, predates it).
 
 ## Architecture: genericity
 

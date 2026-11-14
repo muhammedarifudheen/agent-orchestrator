@@ -193,3 +193,31 @@ def test_the_production_host_is_written_in_exactly_one_python_file():
             hits.append(path.relative_to(ROOT).as_posix())
     assert hits == ["agent/provider_config.py"], f"{needle} must live only in agent/provider_config.py, found in {hits}"
     assert pc.ANTHROPIC_HOST == needle
+
+
+@pytest.mark.parametrize("env,expect", [
+    ({}, False), ({"ANTHROPIC_API_KEY": "k"}, True), ({"ANTHROPIC_AUTH_TOKEN": "tok"}, False),
+    ({"PROVIDER_NAME": "ollama"}, True), ({"PROVIDER_NAME": "ollama", "PROVIDER_BASE_URL": "https://ollama.example.test"}, False),
+    ({"PROVIDER_NAME": "ollama", "PROVIDER_BASE_URL": "https://ollama.example.test", "PROVIDER_API_KEY": "k"}, True),
+    ({"PROVIDER_NAME": "openrouter"}, False), ({"PROVIDER_NAME": "openrouter", "PROVIDER_API_KEY": "k"}, True),
+    ({"PROVIDER_NAME": "freellmpool", "PROVIDER_BASE_URL": "http://pool.test"}, False),
+    ({"PROVIDER_NAME": "freellmpool", "PROVIDER_BASE_URL": "http://pool.test", "PROVIDER_MODEL": "m"}, True),
+    ({"PROVIDER_NAME": "mystery", "ANTHROPIC_API_KEY": "k"}, False),
+])
+def test_credentials_present_is_the_gate_for_live_runs_and_follows_the_provider(env, expect):
+    assert pc.credentials_present(env) is expect
+
+
+def test_the_harness_context_sees_the_provider_and_never_hands_a_placeholder_to_the_client():
+    import io
+    import sys
+    sys.path.insert(0, str(ROOT / "scripts"))
+    try:
+        import live_judgment as lj
+    finally:
+        sys.path.remove(str(ROOT / "scripts"))
+    mk = lambda env: lj._Ctx(env, io.StringIO(), io.StringIO())  # noqa: E731
+    assert mk({}).key == "" and mk({"ANTHROPIC_API_KEY": "sk-a"}).key == "sk-a" and mk({"ANTHROPIC_API_KEY": "sk-a"}).client_key == "sk-a"
+    local = mk({"PROVIDER_NAME": "ollama"})
+    assert local.key and local.client_key is None, "a truthy gate value, and the client reads PROVIDER_* itself"
+    assert mk({"PROVIDER_NAME": "openrouter"}).key == "" and mk({"PROVIDER_NAME": "openrouter", "PROVIDER_API_KEY": "k-or"}).client_key is None

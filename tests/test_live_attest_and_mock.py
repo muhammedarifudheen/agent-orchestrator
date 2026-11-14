@@ -319,10 +319,10 @@ def test_every_record_names_its_provider_and_a_mock_pass_closes_nothing_whicheve
 
 def test_a_skipped_record_also_names_its_provider_and_closes_nothing(tmp_path):
     log = tmp_path / "log.jsonl"
-    code, out = run_cli(["--planner"], {"PROVIDER_NAME": "ollama"}, log)
-    assert code == 2, out  # no ANTHROPIC_API_KEY: the harness stays Anthropic-keyed (the ceremony's key rule is unchanged)
+    code, out = run_cli(["--planner"], {"PROVIDER_NAME": "openrouter"}, log)  # a provider that needs a key, and none is set: no network
+    assert code == 2, out
     r = last_record(log)
-    assert r["result"] == "skipped" and r["provider"] == "ollama" and r["closes_gap"] is None
+    assert r["result"] == "skipped" and r["provider"] == "openrouter" and r["closes_gap"] is None and r["key_present"] is False
 
 
 @pytest.mark.parametrize("sub,provider,host,result,real,expect", [
@@ -370,4 +370,7 @@ def test_the_record_the_harness_writes_carries_the_provider_and_the_provider_gat
     lj._record(ctx, "planner", result, "ok", 0 if result == "pass" else 1, real=real)
     r = last_record(log)
     assert r["provider"] == expect_provider and r["closes_gap"] == expect_closes
+    assert r["provider_model"] == ("" if expect_provider == "unknown" else r["provider_model"]) and isinstance(r["provider_model"], str)
+    if expect_provider == "anthropic":
+        assert r["provider_model"] == "claude-sonnet-5-5"
     assert r["real"] is (real and not mock) and r["result"] == result

@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from agent import provider_config
 from inmem import InMemoryRegistry
 from planners import ClaudePlanner, IntentPlanner, KeywordPlanner, PlannedCall
 
@@ -62,7 +63,7 @@ def check_no_call_before_its_prerequisite(plan: list[PlannedCall]) -> None:
 # -- planners under test --------------------------------------------------------------------------
 
 def claude_skip_reason() -> str | None:
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    if not provider_config.credentials_present():  # ANTHROPIC_API_KEY, or a free provider configured through PROVIDER_* (D29)
         return "ANTHROPIC_API_KEY absent"
     if os.environ.get("LIVE_TESTS") != "1":
         return "LIVE_TESTS=1 not set"

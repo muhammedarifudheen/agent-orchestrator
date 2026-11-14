@@ -107,6 +107,14 @@ def provider_identity(env: Mapping[str, str]) -> tuple[str, str]:
         return "unknown", ""
 
 
+def provider_model(env: Mapping[str, str]) -> str:
+    """The model id this run's environment selects ("" when the provider settings are unusable): written into every record."""
+    try:
+        return _PROVIDER_CONFIG.resolve_model(env)
+    except _PROVIDER_CONFIG.ProviderConfigError:
+        return ""
+
+
 def closes_gap(sub: str, provider: Any, provider_host: Any, result: Any, real: bool) -> str | None:
     """The row a record may close, or None. D27: closes_gap is provider-gated. For the Claude-specific rows (C24, C25, C27) it is the
     row only if the provider is `anthropic` AND it was the production Anthropic host (a proxy named "anthropic" does not count) AND the
@@ -183,7 +191,20 @@ class _Ctx:
 
     @property
     def key(self) -> str:
-        return (self.env.get("ANTHROPIC_API_KEY") or "").strip()
+        """Truthy iff the configured provider is usable (D29): the Anthropic key for Anthropic; for another provider whatever its
+        configuration needs (nothing, for Ollama on a local URL). Falsy is the "key absent" refusal."""
+        try:
+            cfg = _PROVIDER_CONFIG.resolve(self.env)
+        except _PROVIDER_CONFIG.ProviderConfigError:
+            return ""
+        return cfg.api_key or cfg.name
+
+    @property
+    def client_key(self) -> str | None:
+        """What to hand AnthropicHTTP: the Anthropic key; None for another provider, whose client reads PROVIDER_* itself (a placeholder
+        must never be sent as somebody's bearer token)."""
+        provider, _ = provider_identity(self.env)
+        return (self.env.get("PROVIDER_API_KEY") or self.env.get("ANTHROPIC_API_KEY") or "").strip() or None if provider == "anthropic" else None
 
 
 def _now() -> dt.datetime:
@@ -191,7 +212,7 @@ def _now() -> dt.datetime:
 
 
 def _redact(text: str, env: Mapping[str, str]) -> str:
-    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "PROVIDER_API_KEY"):
         secret = (env.get(name) or "").strip()
         if len(secret) >= 8:
             text = text.replace(secret, "<redacted>")
@@ -634,7 +655,7 @@ def _record(ctx: _Ctx, sub: str, result: str, reason: str, code: int, *, real: b
     provider, provider_host = provider_identity(ctx.env)
     line = append_record(log_path(ctx.env), {
         "date": _now().isoformat(), "subcommand": sub, "key_present": bool(ctx.key), "result": result,
-        "provider": provider, "provider_host": provider_host,
+        "provider": provider, "provider_host": provider_host, "provider_model": provider_model(ctx.env),
         "closes_gap": closes_gap(sub, provider, provider_host, result, final_real),
         "reason": _redact(reason, ctx.env), "exit_code": code, "real": final_real, "mock": ctx.mock,
         "allow_live": ctx.allow_live, "artifact_path": artifact, "artifact_sha256": _sha256_file(artifact),
@@ -689,6 +710,8 @@ def _key_missing(ctx: _Ctx, sub: str) -> int:
 def _print_verdict(ctx: _Ctx, verdict: str, label: str, reason: str) -> None:
     if verdict == "pass" and ctx.mock:
         ctx.out(f"PASS (OFFLINE MOCK, real=false: not a live result and it can never close a gap): {label}")
+    elif verdict == "pass" and provider_identity(ctx.env)[0] != "anthropic":
+        ctx.out(f"PASS (free provider {provider_identity(ctx.env)[0]}, real=false: wiring evidence only, it closes no gap): {label}")
     elif verdict == "pass":
         ctx.out(f"PASS (live model): {label}")
     elif verdict == "fail" and ctx.mock:
@@ -750,7 +773,7 @@ def _pipeline_on_dogceo(ctx: _Ctx) -> tuple[str, str, Path | None]:
                     stack.enter_context(live_attest.attesting(ctx.attest_file))
                 if ctx.mock:
                     stack.enter_context(live_mock.mocked())
-                client = HttpDocExtractionClient(AnthropicHTTP(ctx.key))
+                client = HttpDocExtractionClient(AnthropicHTTP(ctx.client_key))
                 return pipeline.process(source, pipeline.Layout(root=proj), doc_client=client)
 
         try:

@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from agent import provider_config
 from generators.from_spec import validate_schema
 from ingest.common import CONFIDENCE_THRESHOLD
 from ingest.doc import UNVERIFIED_SOURCE, DocExtractionClient, HttpDocExtractionClient, ingest
@@ -54,7 +55,7 @@ def check_doc_ingestion_contract(spec: dict, text: str) -> None:
 
 
 def live_skip_reason() -> str | None:
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    if not provider_config.credentials_present():  # ANTHROPIC_API_KEY, or a free provider configured through PROVIDER_* (D29)
         return "ANTHROPIC_API_KEY absent"
     if os.environ.get("LIVE_TESTS") != "1":
         return "LIVE_TESTS=1 not set"
