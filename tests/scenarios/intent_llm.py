@@ -19,28 +19,12 @@ knows only the shapes of the data it is given.
 from __future__ import annotations
 
 import json
-import math
 import re
 from datetime import date, timedelta
 from types import SimpleNamespace as NS
 from typing import Any
 
-_STOP = {"a", "an", "the", "of", "to", "for", "and", "or", "on", "in", "is", "are", "it", "its", "that", "this",
-         "with", "by", "be", "as", "at", "from", "will", "their", "them", "one", "any", "get", "up", "per"}
-
-
-def tokens(text: str) -> set[str]:
-    """Lower-case word set with a crude plural strip, stopwords removed."""
-    out = set()
-    for w in re.split(r"[^a-z0-9]+", text.lower()):
-        if not w or w in _STOP:
-            continue
-        if len(w) > 3 and w.endswith("ies"):
-            w = w[:-3] + "y"
-        elif len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
-            w = w[:-1]
-        out.add(w)
-    return out
+from agent.registry_filter import doc_freq as _doc_freq, score, tokens  # the matcher lives with the registry filter (D31)
 
 
 def resolve_facts(facts: dict[str, Any], today: date | None = None) -> dict[str, Any]:
@@ -48,27 +32,6 @@ def resolve_facts(facts: dict[str, Any], today: date | None = None) -> dict[str,
     today = today or date.today()
     return {k: ((today + timedelta(days=v["days_from_today"])).isoformat()
                 if isinstance(v, dict) and "days_from_today" in v else v) for k, v in facts.items()}
-
-
-def _doc_freq(tools: list[dict]) -> dict[str, int]:
-    """How many offered tools mention each token in name or description (rare tokens are more telling)."""
-    df: dict[str, int] = {}
-    for t in tools:
-        for w in tokens(t["name"].split("__", 1)[-1]) | tokens(t.get("description", "")):
-            df[w] = df.get(w, 0) + 1
-    return df
-
-
-def score(intent_text: str, tool: dict, df: dict[str, int], n_tools: int) -> tuple[float, int]:
-    """(weighted overlap, name overlap). Each shared token counts log(1 + n_tools/df) (an idf weight), times 3
-    when it appears in the tool NAME and 1 when only in the description."""
-    want = tokens(intent_text)
-    name = tokens(tool["name"].split("__", 1)[-1])
-    desc = tokens(tool.get("description", ""))
-    head = next((t for t in re.split(r"[^a-z0-9]+", intent_text.lower()) if t and t not in _STOP), "")
-    head = next(iter(tokens(head)), "")   # the intent's first content word is its verb: it counts 1.5x
-    w = lambda tok: math.log(1 + n_tools / max(df.get(tok, 1), 1)) * (1.5 if tok == head else 1)
-    return (sum(3 * w(t) for t in want & name) + sum(1.0 * w(t) for t in want & (desc - name)), len(want & name))
 
 
 def choose_tool(intent_text: str, tools: list[dict]) -> dict:

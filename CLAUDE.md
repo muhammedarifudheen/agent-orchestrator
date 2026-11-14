@@ -774,6 +774,39 @@ implemented them. Change them here first, then in code.
   `feat:` commit can change anything); only the last 20 commits are looked at, so a mislabel older than that is not re-found; without git history the test
   skips with its reason.
 
+- D31. Deterministic registry filtering: a model is offered the few tools an intent could use, not the whole registry.
+  `agent/registry_filter.py`: `filter(intent, registry, max_tools=8, duties=None)` returns a view of the registry (`FilteredRegistry`: offering is
+  restricted, calls, safety metadata and connection errors are the real registry's); `select_tools(intent, tools, ...)` is the same on a plain list.
+  STRATEGY. (i) every tool referenced by a duty whose pattern the intent fits at all (`DutyLibrary.candidates`, a fuzzy fit counts) is ALWAYS included,
+  even past `max_tools`; (ii) every other tool is scored by keyword overlap with the intent using the SAME scoring the keyword planner uses
+  (`tokens`, `doc_freq`, `score`: moved here unchanged from `tests/scenarios/intent_llm.py`, which imports them back, so there is one matcher); only
+  a tool that overlaps at all is a candidate; (iii) the candidates are capped at `max_tools - (duty tools)`, those from an industry the intent names
+  (a word of at least four letters that is a prefix of the industry or the other way round) first, then by score, then by name. UNMATCHABLE (no duty,
+  no overlapping tool; also an empty intent): the FULL registry comes back, never a silent exclusion. DETERMINISM: the sort key ends in the tool name and
+  every input is a pure function of the intent and the tool list; the same intent and registry give the same subset in 20 consecutive runs and under a
+  reversed listing of the registry (tested per intent of the cross-industry scenario). The module names no industry and no tool (D19 scan covers it).
+  WIRING. (a) `Orchestrator(registry_filter_max_tools=N)` (default None = unchanged) offers the model `filter(goal, ...)`; `ExecutionState` and the
+  run record carry `registry_size_before` / `registry_size_after` (equal when off); the duty and write-policy paths still know every tool. (b)
+  `planners.FilteredPlanner(inner, max_tools)` asks `inner` about ONE intent at a time with only that intent's subset, then sequences the calls so none
+  precedes the call it `consumes` (stable). `ClaudePlanner(max_tools=N)` or `PLANNER_MAX_TOOLS=N` turns it on; it is OFF by default because the
+  wiring tests pin one request that carries the whole registry. `PLANNER_STATS_FILE` appends one JSON line per plan (sizes, requests, seconds).
+  WHY PER INTENT: measured on this registry (31 tools, 8 industries, the 10-intent scenario), a cap of 8 per intent and ONE request that carries
+  the union offers 24 tools, a 23% cut; per-intent requests offer 5-8 each (`[8,5,7,8,8,8,8,8,8,8]`, 74-84% fewer).
+  THE CONTRACT. `test_planner_contract.py` is unchanged and still runs against the whole registry for every planner. `test_registry_filter.py` imports
+  its `check_*` functions and runs them on a filtered plan of the same fixture (passes), and asserts per intent that the tool the unfiltered
+  matcher picks is inside the filtered subset (a miss would be a filter bug, not a contract bug).
+  MEASURED ON OLLAMA (2026-11-14, `qwen3.5:4b`, CPU only; AUDIT.md section 7): THE FILTER DID NOT MAKE THE PLANNER FIT. The harness planner step
+  with `PLANNER_MAX_TOOLS=8` still timed out at 240 s (wall 243.1 s; record `b937a16afbc6`, `real: false`, `closes_gap` null; refused by
+  `move_audit_row.py` with exit 19). Two filtered requests measured directly: 80.7 s with 8 tools and 104.9 s with 5 tools, against 81.4 s for the
+  earlier UNFILTERED request of only 2 tools: the time does not follow the number of tools on this machine (what it does follow is unverified; the model
+  emits a thinking block before its answer). One plan is at least 10 requests and the contract run plans more than once, so a limit that fits one
+  request cannot fit the run. No timeout was raised. The filter is kept: it is correct, deterministic and tested, and it cuts prompt size by the figures
+  above, but it is NOT shown to help on this hardware, and C24 stays open (Claude-specific; only an Anthropic run closes it).
+  Deviations from the brief, recorded: (a) the module is `agent/registry_filter.py`, not `orchestrator/registry_filter.py`: there is no `orchestrator/`
+  package and `agent/` is the orchestrator layer, so the D19 genericity scan covers it; (b) `filter` takes an optional `duties` argument (rule (i) needs
+  the duty library) and returns a registry VIEW, not a `ToolRegistry`; (c) the planner is called once per intent, not once with a filtered union (above);
+  (d) filtering is opt-in for `ClaudePlanner` and the Orchestrator; (e) the keyword scoring moved, it was not copied.
+
 ## Architecture: genericity
 
 Goal: a pipeline that turns ANY reachable system into tools with the same contract, without a

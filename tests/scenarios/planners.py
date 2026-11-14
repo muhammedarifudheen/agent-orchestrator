@@ -17,10 +17,12 @@ no facts, no tool names from the scenario.
 from __future__ import annotations
 
 import json
+import os
+import time
 from dataclasses import dataclass
 from typing import Any, Protocol, Sequence
 
-from agent import provider_config
+from agent import provider_config, registry_filter
 from intent_llm import choose_tool
 
 
@@ -47,6 +49,67 @@ class KeywordPlanner:
 
     def plan(self, intents: Sequence[dict], tools: Sequence[dict]) -> list[PlannedCall]:
         return [PlannedCall(i["id"], choose_tool(i["intent"], list(tools))["name"]) for i in intents]
+
+
+class FilteredPlanner:
+    """Ask `inner` about ONE intent at a time, offering it only `registry_filter.select_tools(intent, tools, max_tools)` (D31).
+
+    A planner asked about all intents at once must be shown every tool any of them could use; measured on this registry
+    (31 tools, 10 intents) a cap of 8 per intent still unions to 25 tools, which saves almost nothing. One small request per
+    intent is what keeps a prompt short. The results are concatenated in the order the intents were given and then ordered
+    so that no call precedes the call whose result it `consumes` (stable: ties keep the given sequence). Deterministic
+    whenever `inner` is. `last_stats` describes the last plan; the contract itself is `inner`'s to meet, unchanged."""
+
+    def __init__(self, inner: IntentPlanner, max_tools: int = registry_filter.DEFAULT_MAX_TOOLS, duties: Any = None) -> None:
+        self.inner, self.max_tools, self.duties = inner, max_tools, duties
+        self.name = f"{inner.name}+filtered"
+        self.last_stats: dict[str, Any] = {}
+
+    def plan(self, intents: Sequence[dict], tools: Sequence[dict]) -> list[PlannedCall]:
+        calls: list[PlannedCall] = []
+        offered: set[str] = set()
+        per_request: list[int] = []
+        seconds: list[float] = []
+        for intent in intents:
+            subset = registry_filter.select_tools(intent["intent"], tools, self.max_tools, self.duties)
+            offered |= {t["name"] for t in subset}
+            per_request.append(len(subset))
+            began = time.monotonic()
+            calls += self.inner.plan([intent], subset)
+            seconds.append(round(time.monotonic() - began, 3))
+        self.last_stats = {"registry_size_before": len(tools), "registry_size_after": len(offered),
+                           "requests": len(per_request), "tools_per_request": per_request, "request_seconds": seconds}
+        return _by_prerequisite(intents, calls)
+
+
+def _by_prerequisite(intents: Sequence[dict], calls: list[PlannedCall]) -> list[PlannedCall]:
+    """Stable ordering: repeatedly take the first call whose `consumes` are all already placed (or not planned at all)."""
+    consumes = {i["id"]: i.get("consumes") or [] for i in intents}
+    planned = {c.intent_id for c in calls}
+    placed: set[str] = set()
+    pending, out = list(calls), []
+    while pending:
+        nxt = next((c for c in pending if all(d in placed or d not in planned for d in consumes.get(c.intent_id, []))), None)
+        if nxt is None:        # a cycle: leave the rest as given; the contract will say so
+            return out + pending
+        pending.remove(nxt)
+        placed.add(nxt.intent_id)
+        out.append(nxt)
+    return out
+
+
+MAX_TOOLS_ENV = "PLANNER_MAX_TOOLS"
+STATS_FILE_ENV = "PLANNER_STATS_FILE"
+
+
+def max_tools_from_env(env: Any = None) -> int | None:
+    """PLANNER_MAX_TOOLS: unset or empty = no filtering; a positive integer = the per-request cap. Anything else is an error."""
+    raw = (os.environ if env is None else env).get(MAX_TOOLS_ENV, "").strip()
+    if not raw:
+        return None
+    if not raw.isdigit() or int(raw) < 1:
+        raise ValueError(f"{MAX_TOOLS_ENV} must be a positive integer, got {raw!r}")
+    return int(raw)
 
 
 SUBMIT_PLAN = {
@@ -83,9 +146,13 @@ class ClaudePlanner:
 
     name = "claude"
 
-    def __init__(self, client: Any = None, model: str | None = None) -> None:
+    def __init__(self, client: Any = None, model: str | None = None, max_tools: int | None = None) -> None:
         self._client = client
         self._model = model or provider_config.resolve_model()  # PROVIDER_MODEL; Anthropic's model by default (D29)
+        # D31: None = one request that carries the whole registry (what the wiring tests pin); N = one request per intent
+        # offering at most N tools. PLANNER_MAX_TOOLS sets it from the environment, so a live run needs no code change.
+        self._max_tools = max_tools if max_tools is not None else max_tools_from_env()
+        self.last_stats: dict[str, Any] = {}
 
     def _ask(self, client: Any, payload: dict[str, Any], strict: bool) -> Any:
         try:
@@ -100,6 +167,33 @@ class ClaudePlanner:
         return block, getattr(resp, "stop_reason", None)
 
     def plan(self, intents: Sequence[dict], tools: Sequence[dict]) -> list[PlannedCall]:
+        began = time.monotonic()
+        if self._max_tools is None:
+            calls = self._plan_all(intents, tools)
+            self.last_stats = {"registry_size_before": len(tools), "registry_size_after": len(tools), "requests": 1,
+                               "tools_per_request": [len(tools)], "request_seconds": [round(time.monotonic() - began, 3)]}
+        else:
+            filtered = FilteredPlanner(_Whole(self), self._max_tools)
+            calls = filtered.plan(intents, tools)
+            self.last_stats = dict(filtered.last_stats)
+        self._write_stats(began)
+        return calls
+
+    def _write_stats(self, began: float) -> None:
+        """PLANNER_STATS_FILE: append one JSON line per plan (sizes, requests, seconds), so a run inside a pytest subprocess can
+        report what it measured. Opt-in and best effort: a measurement never fails a plan."""
+        path = os.environ.get(STATS_FILE_ENV)
+        if not path:
+            return
+        try:
+            line = json.dumps({**self.last_stats, "model": self._model, "max_tools": self._max_tools,
+                               "total_seconds": round(time.monotonic() - began, 3)})
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except OSError:
+            pass
+
+    def _plan_all(self, intents: Sequence[dict], tools: Sequence[dict]) -> list[PlannedCall]:
         client = self._client
         if client is None:
             from ingest.anthropic_http import AnthropicHTTP  # lazy: building the keyword planner needs no key
@@ -118,3 +212,10 @@ class ClaudePlanner:
                                                   and isinstance(c.get("tool"), str) for c in calls):
             raise PlannerError(f"PLANNER_BAD_PLAN: calls must be a list of {{intent_id, tool}}, got {calls!r}")
         return [PlannedCall(c["intent_id"], c["tool"]) for c in calls]
+
+
+class _Whole:
+    """`ClaudePlanner` seen as an IntentPlanner that sends every request it is given as one (no filtering of its own)."""
+
+    def __init__(self, planner: ClaudePlanner) -> None:
+        self.name, self.plan = planner.name, planner._plan_all

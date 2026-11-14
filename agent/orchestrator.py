@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 from agent.duties import (DUTY_CONFIDENCE_THRESHOLD, BoundaryEvent, DutyContractError, DutyLibrary, DutyMatch,
                           allow_reviewed_duty, boundary_error, holds, resolve)
-from agent import approvals
+from agent import approvals, registry_filter
 from agent.tool_registry import SEP, ToolOutcome, ToolRegistry
 from agent.write_policy import APPROVAL_REQUIRED, WritePolicy, WriteProposal, classify
 
@@ -83,6 +83,9 @@ class ExecutionState:
     write_decisions: list[dict[str, Any]] = field(default_factory=list)
     pending_writes: list[dict[str, Any]] = field(default_factory=list)
     pending_approval: dict[str, Any] | None = None
+    # Registry filtering (D31): how many tools the registry has and how many were OFFERED to the model (equal when filtering is off).
+    registry_size_before: int | None = None
+    registry_size_after: int | None = None
 
     def note(self, line: str) -> None:
         self.log.append(line)
@@ -187,6 +190,7 @@ class Orchestrator:
         allow_writes: bool = False,
         approver: Callable[..., Any] | None = None,
         approvals_dir: Path | None = None,
+        registry_filter_max_tools: int | None = None,
     ) -> None:
         if client is None:
             from anthropic import AsyncAnthropic  # reads ANTHROPIC_API_KEY
@@ -200,6 +204,8 @@ class Orchestrator:
         # Duties are discovered from duties/ ("auto"), passed in, or switched off (None). Nothing here names one (D22).
         self.duties = DutyLibrary() if duties == "auto" else duties
         self.duty_threshold, self.write_gate, self.run_log_dir = duty_threshold, write_gate, run_log_dir
+        # D31: None offers the model every tool; N offers the filtered subset for the goal (duty tools always included, at most N others).
+        self.registry_filter_max_tools = registry_filter_max_tools
         # D24: no write runs unless allow_writes, an approver says yes to that call, or the duty is declared unattended.
         self.policy = WritePolicy(allow_writes, approver)
         self.duty_errors: dict[str, str] = {}
@@ -209,9 +215,14 @@ class Orchestrator:
     async def run(self, goal: str) -> RunResult:
         state = ExecutionState(goal=goal)
         self._log(state, f"GOAL: {goal}")
-        tools = self.registry.anthropic_tools()
-        self._tool_defs = {t["name"]: t for t in tools}
+        all_tools = self.registry.anthropic_tools()
+        self._tool_defs = {t["name"]: t for t in all_tools}   # every tool stays known to the duty and policy paths
+        tools = all_tools
+        if self.registry_filter_max_tools is not None:
+            tools = registry_filter.filter(goal, self.registry, self.registry_filter_max_tools, self.duties).anthropic_tools()
+        state.registry_size_before, state.registry_size_after = len(all_tools), len(tools)
         self._log(state, f"TOOLS AVAILABLE: {', '.join(t['name'] for t in tools) or '(none)'}")
+        self._log(state, f"REGISTRY SIZE: before={len(all_tools)} after={len(tools)}")
         if not tools:
             return self._escalate(state, "No tools available (all MCP servers failed to connect: "
                                   f"{self.registry.connect_errors}).", "")
@@ -447,6 +458,7 @@ class Orchestrator:
             path = self.run_log_dir / f"{stem}_{n}.json"
         record = {"goal": state.goal, "success": True, "user": self.user_id, "duty_used": duty_used,
                   "duty_contract_failed": state.duty_contract_failed, "write_decisions": state.write_decisions,
+                  "registry_size_before": state.registry_size_before, "registry_size_after": state.registry_size_after,
                   "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                   "operations": [{"tool": o.tool, "arguments": o.arguments, "ok": o.ok, "result": o.result,
                                   "read_only": self._read_only(o.tool)} for o in state.operations]}
