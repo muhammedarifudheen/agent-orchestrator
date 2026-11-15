@@ -850,6 +850,26 @@ implemented them. Change them here first, then in code.
   offline mock, which is `real: false`). The ceremony script's own call into `move_audit_row.py` is tested with a fake runner (argv asserted), not
   end to end.
 
+- D34. `PROJECT_STATUS.md` is the one-page answer to "what is this and is it done?", and it is held to AUDIT.md by a test, not by care.
+  Exactly four sections: (1) what the system is, five lines; (2) what is proven, 15 claims copied VERBATIM from AUDIT.md section 2, each with its first cited
+  test and the command that runs it; (3) what is not proven, each with its reason and the command that would close it; (4) the two commands that close the
+  remaining gaps (Anthropic credits required; GPU inference required for the planner within budget). `tests/test_project_status_accuracy.py` enforces: the four headings; five lines in
+  (1); in (2) 10 to 15 lines whose claim text equals AUDIT's character for character, whose test AUDIT cites for that claim, whose command is
+  `python -m pytest "<id>" -q`, and every named test is RUN and must pass (a skip fails; 14 s, so it runs by default, not only under `--runslow`); in (3) every
+  row named is still open in AUDIT.md section 3a, each bullet has a Reason and a Command that AUDIT.md itself contains, and C24, C25 and C27 each keep a
+  bullet of their own while open; in (4) the Anthropic command is the one AUDIT section 5 gives and the Ollama block is lines of section 7's. A ROW THAT MOVES
+  from 3a to 2b FAILS THE TEST until the page is edited (it may not stay in (3), it must appear in (2)); that is shown with the real `move_audit_row.plan_edit`.
+  The checker is itself shown to fail on nine kinds of drift (a summarized claim, a test AUDIT does not cite, a claim that is not proven, a proven row in (3), a
+  dropped C24, a command AUDIT lacks, a fifth section, a changed ceremony command, a removed GPU line). Two of my own errors were caught by it while it was
+  being built, and recorded: the page's free-provider bullet cross-referenced a PROVEN row (C61) inside section 3, and a passing mention of C24 in another
+  bullet satisfied "names C24" after C24's own bullet was deleted (the rule now needs a bullet that leads with the id).
+  Deviations, recorded: (a) the brief said one line per claim in AUDIT section 2 and also 10 to 15 bullets; section 2 holds 45 claims, so the page carries 15, one per
+  pillar of the system (generation, review gate, learning loop, orchestrator genericity, write safety, handoff, error contract, planner abstraction, duties,
+  induction, write policy, attestation, provider gating, registry filter, the ceremony's success path), chosen by hand and stated as a selection; AUDIT.md
+  remains the full list. (b) The brief also said no new tests beyond the previous package's, and asked for this test file; the explicit item was followed.
+  LIMITS: it checks that the page AGREES with AUDIT.md, not that AUDIT.md is right; the prose of (1) and the reasons in (3) are checked for presence, not truth;
+  which 15 claims appear is a choice no test can judge; a newly proven claim does not have to appear.
+
 ## Architecture: genericity
 
 Goal: a pipeline that turns ANY reachable system into tools with the same contract, without a

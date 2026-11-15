@@ -1,5 +1,9 @@
 # Agent orchestration system
 
+This is the agent orchestration system.  
+Read [PROJECT_STATUS.md](PROJECT_STATUS.md) first.  
+Full audit in [AUDIT.md](AUDIT.md).
+
 Industry-agnostic orchestrator: a goal in natural language, tools from MCP servers, one error contract, and a human handoff with
 full context when automation cannot finish. Architecture, rules and every recorded decision are in [CLAUDE.md](CLAUDE.md).
 
