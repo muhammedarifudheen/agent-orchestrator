@@ -904,6 +904,37 @@ implemented them. Change them here first, then in code.
   Process note: the work was split between two subagents (the app and its fixtures; the requirements, README and first test) against a written contract, and
   integrated and verified here. The test author loosened the socket guard to allow loopback; that is kept, with the reason above.
 
+- D36. The documentation site (`site/`, Astro Starlight) is generated from the repo's own Markdown at build time and is held to it by a drift test; it authors no text of its own.
+  PAGES: PROJECT_STATUS.md, AUDIT.md, docs/ONBOARDING.md, docs/LIVE_RUN.md and CLAUDE.md ("Decisions"), in that sidebar order, at `/project-status/`, `/audit/`,
+  `/onboarding/`, `/live-run/`, `/decisions/`; `/` redirects to the first. NO COPIES: `site/src/content.config.ts` wraps Astro's `glob` loader with `base: '..'`, so the
+  five files are read where they live; it merges a frontmatter `title` under any real one (Starlight requires it; the sources have none) and THROWS if any of the five is
+  missing; no `.md` file exists under `site/` outside `node_modules` (checked). Search is Starlight's local Pagefind; dark is the default theme (an inline script
+  that never consults `prefers-color-scheme`; Starlight's own "Auto" option remains); no analytics, cookies, external fonts or CDN (the drift test scans for them); the
+  default title is replaced by nothing because each source starts with its own H1. PROVENANCE: every page has `<footer class="provenance" data-commit data-dirty data-built
+  data-source>` with the REAL `git rev-parse HEAD` at build time (the build fails if git fails), whether the tree was dirty, one build timestamp, and the source file's
+  repo path; the 404 page has none (it has no source file).
+  THE GUARD (`tests/test_site_drift.py`): `drift_problems(md, html)` compares EVERY heading (level and text) and EVERY fenced code block (line by line, verbatim apart from trailing whitespace) of a
+  source with the built page, as multisets, one direction (the site may add, never lose or change). It is proven on synthetic pages that always run (a removed heading, a
+  one-character change in code, headings without code, a page with only a title, a duplicated heading present once, a wrong heading level all fail naming what is wrong). The REAL
+  check, `test_the_built_site_agrees_with_the_repo`, needs a build and runs only with `RUN_SITE=1`; without it it is ONE listed skip (AUDIT.md 3b row 27) so the default suite never
+  depends on whether `site/dist` exists on a machine. With it, it also requires each page's footer to be well formed with `data-commit` equal to HEAD (a stale build fails: "rebuild"),
+  and scans the whole of `site/dist` for any remote load. It was calibrated on a real build, not just synthetic markup. FINDING: the first real run FAILED on four headings that
+  contain straight quotes: Astro's default smartypants rewrote them to curly quotes, silently altering the repo's text. Fixed in the build (`markdown.smartypants: false` in
+  `site/astro.config.mjs`), not by loosening the test. After it, all 64 headings and 39 fenced blocks of the five documents match. Shown on the real build (each restored): a deliberate
+  edit to AUDIT.md without a rebuild fails naming the new heading and the new code block; deleting a code block from a built page fails naming it; deleting a heading fails naming it.
+  DEPLOY: `.github/workflows/docs.yml` builds (`npm ci`, `npm run build`), runs `RUN_SITE=1 pytest tests/test_site_drift.py`, then uploads `site/dist`; the deploy job needs the build
+  job and runs only on main, never for a pull request; the drift step comes after the build and before the upload and cannot be ignored (no `continue-on-error`, no `|| true`).
+  `SITE_BASE` comes from `actions/configure-pages`, never from a literal repository name, and that step FAILS until a human enables Pages (`docs/PUBLISHING.md`, two lines): nothing
+  here enables Pages, creates a repository or pushes. `tests/test_site_publishing.py` holds the workflow to those rules and is shown to fail on eleven kinds of edit to it. VERSIONS: Astro 6.4.8 and
+  `@astrojs/starlight` 0.39.3, pinned exactly and locked (`site/package-lock.json`; CI uses `npm ci`). npm resolves Astro 7.4.12 / Starlight 0.43.1 today, which cannot run on
+  the build machine: Astro 7 loads a native markdown module (`satteri`) that Windows Application Control blocks, with no configuration workaround; it is untested on Linux, so CI
+  uses the lockfile's versions, which are the ones tested. Telemetry: Astro has no config switch; CI sets `ASTRO_TELEMETRY_DISABLED=1`.
+  NOT DONE / NOT PROVEN: the workflow has never run (this repository has no remote: precondition 3 of the brief, "a git repo with a remote", failed literally and was judged non-blocking,
+  because every deliverable is local and the brief's own deploy rules describe a machine without one); the pinned action versions are unverified; Pages is not enabled; the site has never
+  been published. SCOPE OF "NO NEW CLAIMS": the site adds only labels and the provenance footer; it publishes ONBOARDING.md, LIVE_RUN.md and CLAUDE.md as written, as the brief lists them, and
+  those contain statements that are not in AUDIT.md or PROJECT_STATUS.md, so "nothing that is not in AUDIT.md or PROJECT_STATUS.md" holds for what the site AUTHORS, not for what those three
+  files say. Process: the project (A) and the guard (B) were written by two subagents against a contract and verified, calibrated and integrated here.
+
 ## Architecture: genericity
 
 Goal: a pipeline that turns ANY reachable system into tools with the same contract, without a

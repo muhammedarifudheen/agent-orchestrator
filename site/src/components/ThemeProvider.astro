@@ -1,0 +1,8 @@
+{/* Dark by default: only an explicit visitor choice (theme toggle) overrides it. prefers-color-scheme is ignored. */}
+<script is:inline>
+	(() => {
+		const storedTheme =
+			typeof localStorage !== 'undefined' && localStorage.getItem('starlight-theme');
+		document.documentElement.dataset.theme = storedTheme === 'light' ? 'light' : 'dark';
+	})();
+</script>

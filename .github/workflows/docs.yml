@@ -1,0 +1,81 @@
+name: docs
+
+# Builds the documentation site from the repo's own Markdown, runs the drift test, and deploys to GitHub Pages ONLY if the drift test passes.
+# A pull request builds and tests but never deploys. Enabling Pages is a one-time human action (docs/PUBLISHING.md): until it is done the
+# configure-pages step below fails, which is the intended behaviour. Nothing here creates the repository setting or pushes anywhere.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  ASTRO_TELEMETRY_DISABLED: "1"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the Pages base path (fails until Pages is enabled by a human)
+        id: pages
+        uses: actions/configure-pages@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install the site's dependencies
+        run: npm ci
+        working-directory: site
+
+      - name: Build the site from ../AUDIT.md, ../PROJECT_STATUS.md, ../docs/*.md and ../CLAUDE.md
+        run: npm run build
+        working-directory: site
+        env:
+          SITE_ORIGIN: ${{ steps.pages.outputs.origin }}
+          SITE_BASE: ${{ steps.pages.outputs.base_path }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install the test dependencies
+        run: pip install -r requirements.txt
+
+      - name: Drift test (REQUIRED - a failure stops this job, so nothing is uploaded or deployed)
+        run: python -m pytest tests/test_site_drift.py -q -p no:cacheprovider
+        env:
+          RUN_SITE: "1"
+
+      - name: Upload the built site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/dist
+
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
