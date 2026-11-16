@@ -1,0 +1,6 @@
+{
+  "claims": "CLAIMS — every statement on this page is backed by a test listed in AUDIT §2. The site adds no text.",
+  "procedures": "PROCEDURES — commands and instructions, verified by the named tests. Not claims about system capability.",
+  "decisions": "DECISION LOG — a record of choices, including predictions that were later falsified. Not claims.",
+  "not_found": "404 — not a page from the repo; no claims here."
+}

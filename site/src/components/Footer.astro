@@ -1,22 +1,14 @@
 ---
 import Default from '@astrojs/starlight/components/Footer.astro';
-import path from 'node:path';
-import { getEntry } from 'astro:content';
 import { provenance } from '../lib/provenance';
+import { sourcePath } from '../lib/source';
 
-const routeEntry = Astro.locals.starlightRoute.entry;
-const entry = (await getEntry('docs', routeEntry.id)) ?? routeEntry;
-const is404 = routeEntry.id === '404';
-const abs = path.resolve(process.cwd(), entry.filePath ?? '');
-const source = path.relative(provenance.repoRoot, abs).split(path.sep).join('/');
-if (!is404 && (!entry.filePath || source.startsWith('..'))) {
-	throw new Error(`Cannot determine repo source path for ${entry.id}`);
-}
+const source = await sourcePath(Astro.locals.starlightRoute.entry);
 const { commit, dirty, built } = provenance;
 ---
 
 <Default {...Astro.props}><slot /></Default>
-{!is404 && <footer class="provenance" data-commit={commit} data-dirty={String(dirty)} data-built={built} data-source={source}>
+{source !== null && <footer class="provenance" data-commit={commit} data-dirty={String(dirty)} data-built={built} data-source={source}>
 	Source: {source} · Commit: {commit.slice(0, 7)} · Built: {built}
 </footer>}
 

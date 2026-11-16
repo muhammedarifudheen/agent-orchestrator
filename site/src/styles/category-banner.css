@@ -1,0 +1,9 @@
+.category-banner {
+	margin: 0 0 1.25rem;
+	padding: 0.6rem 0.9rem;
+	border-left: 4px solid var(--sl-color-accent);
+	background: var(--sl-color-gray-6);
+	color: var(--sl-color-text);
+	font-size: var(--sl-text-sm);
+	font-weight: 600;
+}

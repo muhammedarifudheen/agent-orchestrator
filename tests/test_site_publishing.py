@@ -8,6 +8,7 @@ something. Does NOT prove: that the workflow runs on GitHub, that the pinned act
 from __future__ import annotations
 
 import copy
+import re
 from pathlib import Path
 
 import pytest
@@ -78,6 +79,31 @@ def problems(wf: dict, raw: str) -> list[str]:
         out.append("SITE_BASE must come from the configure-pages output, not a literal repository name")
     if str((wf.get("env") or {}).get("ASTRO_TELEMETRY_DISABLED")) != "1":
         out.append("ASTRO_TELEMETRY_DISABLED must be \"1\" in the workflow")
+    return out + uses_problems(raw)
+
+
+USES = re.compile(r"^\s*(?:-\s+)?uses:\s*(?P<ref>\S+)(?P<rest>.*)$")
+SHA_PINNED = re.compile(r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$")
+VERSION_COMMENT = re.compile(r"^\s+#\s*v\d+(?:\.\d+){0,2}\s*$")
+EXPECTED_ACTIONS = {"actions/checkout", "actions/configure-pages", "actions/setup-node", "actions/setup-python",
+                    "actions/upload-pages-artifact", "actions/deploy-pages"}
+
+
+def uses_problems(raw: str) -> list[str]:
+    """Every `uses:` must be a full 40-hex commit SHA with the version in a comment on the same line; a moving tag alone fails."""
+    out, seen = [], set()
+    for n, line in enumerate(raw.splitlines(), 1):
+        m = USES.match(line)
+        if not m:
+            continue
+        ref = m["ref"]
+        seen.add(ref.split("@")[0])
+        if not SHA_PINNED.match(ref):
+            out.append(f"line {n}: {ref} is not pinned to a full 40-hex commit SHA (a moving tag such as @v4 can be re-pointed at other code)")
+        elif not VERSION_COMMENT.match(m["rest"]):
+            out.append(f"line {n}: {ref} has no version comment on the same line (expected `# vX.Y.Z`)")
+    if seen != EXPECTED_ACTIONS:
+        out.append(f"the workflow uses {sorted(seen)}, expected exactly {sorted(EXPECTED_ACTIONS)}")
     return out
 
 
@@ -142,3 +168,32 @@ def test_publishing_md_is_the_two_line_human_step():
     assert "Settings" in lines[0] and "Pages" in lines[0] and "GitHub Actions" in lines[0]
     assert ".github/workflows/docs.yml" in lines[1] and "drift test" in lines[1] and "only if it passes" in lines[1]
     assert "github.com/" not in text, "no invented repository name"
+
+
+def test_every_action_is_pinned_to_a_full_commit_sha_with_a_version_comment():
+    assert uses_problems(RAW) == []
+    lines = [ln for ln in RAW.splitlines() if USES.match(ln)]
+    assert len(lines) == 6, lines  # checkout, configure-pages, setup-node, setup-python, upload-pages-artifact, deploy-pages
+    assert all(re.search(r"@[0-9a-f]{40} # v\d+\.\d+\.\d+$", ln) for ln in lines), lines
+
+
+def _swap(pattern, repl):
+    return lambda raw: re.sub(pattern, repl, raw, count=1)
+
+
+RAW_MUTATIONS = [
+    ("a moving tag instead of a SHA", _swap(r"(actions/checkout)@[0-9a-f]{40}\s+# v[\d.]+", r"\1@v4"), "not pinned"),
+    ("a short SHA", _swap(r"(actions/setup-node)@([0-9a-f]{7})[0-9a-f]{33}", r"\1@\2"), "not pinned"),
+    ("a branch name", _swap(r"(actions/deploy-pages)@[0-9a-f]{40}\s+# v[\d.]+", r"\1@main"), "not pinned"),
+    ("a SHA with no version comment", _swap(r"(actions/configure-pages@[0-9a-f]{40})\s+# v[\d.]+", r"\1"), "no version comment"),
+    ("a SHA with a comment that is not a version", _swap(r"(actions/setup-python@[0-9a-f]{40})\s+# v[\d.]+", r"\1 # latest"), "no version comment"),
+    ("an action nobody pinned is added", lambda raw: raw + "\n      - uses: actions/cache@v4\n", "not pinned"),
+]
+
+
+@pytest.mark.parametrize("label,edit,needle", RAW_MUTATIONS, ids=[m[0] for m in RAW_MUTATIONS])
+def test_unpinned_actions_are_caught(label, edit, needle):
+    assert uses_problems(RAW) == [], "the control: the real workflow is fully pinned"
+    changed = edit(RAW)
+    assert changed != RAW, "the edit must change something"
+    assert any(needle in p for p in uses_problems(changed)), uses_problems(changed)

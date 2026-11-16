@@ -18,9 +18,11 @@ export default defineConfig({
       title: 'Agent Orchestrator docs',
       // Pagefind search is enabled by default and runs locally.
       credits: false,
+      customCss: ['./src/styles/category-banner.css'],
       components: {
         ThemeProvider: './src/components/ThemeProvider.astro',
         PageTitle: './src/components/PageTitle.astro',
+        Hero: './src/components/Hero.astro',
         Footer: './src/components/Footer.astro',
       },
       sidebar: [

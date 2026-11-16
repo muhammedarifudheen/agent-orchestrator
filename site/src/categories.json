@@ -1,0 +1,5 @@
+{
+  "claims": ["AUDIT.md", "PROJECT_STATUS.md"],
+  "procedures": ["docs/ONBOARDING.md", "docs/LIVE_RUN.md"],
+  "decisions": ["CLAUDE.md"]
+}

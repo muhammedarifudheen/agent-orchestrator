@@ -438,6 +438,184 @@ def test_provenance_parser():
 
 
 # ---------------------------------------------------------------------------
+# Category banners (CLAUDE.md D36): every page says what KIND of statement it makes
+# ---------------------------------------------------------------------------
+
+# The banner texts are pinned HERE, independently of site/src/category-banners.json (which the site renders from): a test that read the
+# very file the site reads could never disagree with it. Changing a text is a deliberate edit of both.
+CATEGORY_TEXT = {
+    "claims": "CLAIMS — every statement on this page is backed by a test listed in AUDIT §2. The site adds no text.",
+    "procedures": "PROCEDURES — commands and instructions, verified by the named tests. Not claims about system capability.",
+    "decisions": "DECISION LOG — a record of choices, including predictions that were later falsified. Not claims.",
+}
+NOT_FOUND_TEXT = "404 — not a page from the repo; no claims here."
+STARLIGHT_404_COPY = "404 Page not found. Check the URL or try using the search bar."  # Starlight's own 404 text (version locked by package-lock.json)
+CATEGORIES_FILE = ROOT / "site" / "src" / "categories.json"
+
+
+class _Banners(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.items = []  # (attrs, visible text)
+        self._cur = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "aside" and "category-banner" in _classes(attrs):
+            self._cur = [dict(attrs), []]
+
+    def handle_data(self, data):
+        if self._cur is not None:
+            self._cur[1].append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "aside" and self._cur is not None:
+            self.items.append((self._cur[0], _norm("".join(self._cur[1]))))
+            self._cur = None
+
+
+def banners(html_text):
+    """Every category banner in a page -> [(attributes, text)]."""
+    p = _Banners()
+    p.feed(html_text)
+    return p.items
+
+
+def category_problems(name, html_text, source, categories):
+    """The page must carry exactly one banner, and it must be the one that categories.json gives this source file."""
+    expected = [c for c, files in categories.items() if source in files]
+    if len(expected) != 1:
+        return ["%s: categories.json must list %s in exactly one category, it lists it in %d" % (name, source, len(expected))]
+    want = expected[0]
+    found = banners(html_text)
+    if len(found) != 1:
+        return ["%s: expected exactly one category banner, found %d" % (name, len(found))]
+    attrs, text = found[0]
+    actual = next((c for c, t in CATEGORY_TEXT.items() if t == text), None)
+    out = []
+    if actual is None:
+        out.append("%s: the banner text is not one of the three category texts: %r" % (name, text[:70]))
+    elif actual != want:
+        out.append("%s: the banner says %s but categories.json puts %s in %s" % (name, actual.upper(), source, want.upper()))
+    if attrs.get("data-category") != want:
+        out.append("%s: the banner's data-category is %r but categories.json puts %s in %r" % (name, attrs.get("data-category"), source, want))
+    return out
+
+
+class _MainText(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts, self._depth, self._skip = [], 0, 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "main":
+            self._depth += 1
+        elif self._depth and tag in ("script", "style"):
+            self._skip += 1
+
+    def handle_endtag(self, tag):
+        if tag == "main" and self._depth:
+            self._depth -= 1
+        elif self._depth and tag in ("script", "style") and self._skip:
+            self._skip -= 1
+
+    def handle_data(self, data):
+        if self._depth and not self._skip:
+            self.parts.append(data)
+
+
+def not_found_problems(html_text):
+    """The 404 page has no source file: it carries the 404 banner, Starlight's own 404 copy, and nothing claim-like."""
+    out = []
+    found = banners(html_text)
+    if len(found) != 1:
+        out.append("404.html: expected exactly one banner, found %d" % len(found))
+    else:
+        attrs, text = found[0]
+        if text != NOT_FOUND_TEXT or attrs.get("data-category") != "404":
+            out.append("404.html: the banner must be the 404 banner (%r), it is %r with data-category %r" % (NOT_FOUND_TEXT, text, attrs.get("data-category")))
+    if provenance(html_text) is not None:
+        out.append("404.html: has a provenance footer, but it has no source file")
+    if html_code_blocks(html_text):
+        out.append("404.html: has a code block")
+    p = _MainText()
+    p.feed(html_text)
+    rest = _norm("".join(p.parts)).replace(NOT_FOUND_TEXT, "", 1).strip()
+    if rest != STARLIGHT_404_COPY:
+        out.append("404.html: the page holds more than the banner and Starlight's 404 copy: %r" % rest[:120])
+    return out
+
+
+def _cats(**kw):
+    return {k: list(v) for k, v in kw.items()}
+
+
+def _banner_html(category, text, extra=""):
+    return '<main><aside class="category-banner" role="note" data-category="%s" data-source="S.md">%s</aside>%s</main>' % (category, text, extra)
+
+
+def test_categories_json_lists_each_source_exactly_once_in_the_three_categories():
+    import json
+
+    cats = json.loads(CATEGORIES_FILE.read_text(encoding="utf-8"))
+    assert cats == {
+        "claims": ["AUDIT.md", "PROJECT_STATUS.md"],
+        "procedures": ["docs/ONBOARDING.md", "docs/LIVE_RUN.md"],
+        "decisions": ["CLAUDE.md"],
+    }
+    assert sorted(f for files in cats.values() for f in files) == sorted(s for _, s in PAGES), "every page, once"
+    assert set(CATEGORY_TEXT) == set(cats)
+
+
+def test_a_page_with_the_right_banner_has_no_category_problem():
+    page = _banner_html("procedures", CATEGORY_TEXT["procedures"])
+    assert category_problems("S.md (/s/)", page, "S.md", _cats(procedures=["S.md"])) == []
+
+
+def test_a_page_missing_its_banner_fails_naming_the_page():
+    probs = category_problems("docs/LIVE_RUN.md (/live-run/)", "<main><h1>x</h1></main>", "docs/LIVE_RUN.md", _cats(procedures=["docs/LIVE_RUN.md"]))
+    assert len(probs) == 1 and "docs/LIVE_RUN.md (/live-run/)" in probs[0] and "found 0" in probs[0]
+
+
+def test_a_banner_that_does_not_match_its_category_fails_naming_both():
+    page = _banner_html("claims", CATEGORY_TEXT["claims"])
+    probs = category_problems("docs/LIVE_RUN.md (/live-run/)", page, "docs/LIVE_RUN.md", _cats(procedures=["docs/LIVE_RUN.md"]))
+    assert any("CLAIMS" in p and "PROCEDURES" in p and "docs/LIVE_RUN.md" in p for p in probs), probs
+
+
+def test_two_banners_an_altered_text_and_a_wrong_data_attribute_all_fail():
+    cats = _cats(decisions=["S.md"])
+    good = CATEGORY_TEXT["decisions"]
+    two = _banner_html("decisions", good, extra='<aside class="category-banner" data-category="decisions">%s</aside>' % good)
+    assert any("exactly one" in p for p in category_problems("S.md", two, "S.md", cats))
+    altered = _banner_html("decisions", good.replace("Not claims.", "All claims."))
+    assert any("not one of the three" in p for p in category_problems("S.md", altered, "S.md", cats))
+    wrong_attr = _banner_html("claims", good)
+    assert any("data-category" in p for p in category_problems("S.md", wrong_attr, "S.md", cats))
+
+
+def test_a_source_in_no_category_or_in_two_fails():
+    page = _banner_html("claims", CATEGORY_TEXT["claims"])
+    assert category_problems("S.md", page, "S.md", _cats(claims=["X.md"]))
+    assert category_problems("S.md", page, "S.md", _cats(claims=["S.md"], decisions=["S.md"]))
+
+
+_GOOD_404 = _banner_html("404", NOT_FOUND_TEXT, extra="<h1>404</h1><p>Page not found. Check the URL or try using the search bar.</p>").replace(
+    "<h1>404</h1><p>Page", "<p>404 Page"
+)
+
+
+def test_the_404_page_has_its_special_banner_and_nothing_claim_like():
+    assert not_found_problems(_GOOD_404) == []
+    assert any("exactly one banner" in p for p in not_found_problems(_GOOD_404.replace('class="category-banner"', 'class="x"')))
+    wrong = _GOOD_404.replace('data-category="404"', 'data-category="claims"')
+    assert any("must be the 404 banner" in p for p in not_found_problems(wrong))
+    extra = _GOOD_404.replace("</main>", "<p>Every flow is proven.</p></main>")
+    assert any("more than the banner" in p for p in not_found_problems(extra))
+    assert any("provenance footer" in p for p in not_found_problems(_GOOD_404 + '<footer class="provenance"></footer>'))
+    assert any("code block" in p for p in not_found_problems(_GOOD_404.replace("</main>", "<pre>x</pre></main>")))
+
+
+# ---------------------------------------------------------------------------
 # The real check (needs a built site)
 # ---------------------------------------------------------------------------
 
@@ -517,6 +695,9 @@ def test_the_built_site_agrees_with_the_repo():
     if not dist.is_dir():
         problems.append("site build missing: %s does not exist" % dist)
     else:
+        import json
+
+        categories = json.loads(CATEGORIES_FILE.read_text(encoding="utf-8"))
         for slug, source in PAGES:
             src_file = ROOT / source
             page = dist / slug / "index.html"
@@ -529,6 +710,7 @@ def test_the_built_site_agrees_with_the_repo():
             md = src_file.read_text(encoding="utf-8")
             html = page.read_text(encoding="utf-8")
             problems += drift_problems(md, html, source)
+            problems += category_problems("%s (/%s/)" % (source, slug), html, source, categories)
 
             fp = provenance(html)
             if fp is None:
@@ -552,6 +734,11 @@ def test_the_built_site_agrees_with_the_repo():
                 problems.append("%s: data-built %r is not ISO-8601" % (source, built))
             if fp.get("data-dirty") not in ("true", "false"):
                 problems.append("%s: data-dirty %r is not true/false" % (source, fp.get("data-dirty")))
+        not_found = dist / "404.html"
+        if not not_found.is_file():
+            problems.append("404.html: built page missing")
+        else:
+            problems += not_found_problems(not_found.read_text(encoding="utf-8"))
         problems += _site_wide_problems(dist)
 
     if problems:

@@ -39,6 +39,7 @@ Each line is a claim from AUDIT.md section 2, verbatim, with its first cited tes
 - **C58** Free-provider limit, plan quality. Reason: `qwen3.5:4b` returned a parseable tool call that chose `travel__search_flights` for "book a seat"; free providers verify the wire format and the parser, not plan quality. Command: `python scripts/live_judgment.py --planner` with a larger `PROVIDER_MODEL`.
 - **C58** Free-provider limit, doc extraction within the client timeout. Reason: the request hit the client's 120 s `ReadTimeout` on this CPU. Command: `python scripts/live_judgment.py --doc`
 - **C26** Live behaviour of the five real-API servers. Reason: their live behaviour has no attested passing record; it is an opt-in step that needs no key but sends real requests to five third-party APIs. Command: `python scripts/live_judgment.py --live-apis --allow-live`
+- **C66** The docs deploy workflow (`.github/workflows/docs.yml`) has never run: it builds, tests and deploys only when a human enables Pages. Reason: first real run requires a remote and a human to enable Pages (a failing `configure-pages` step is the expected first-run state, not a failure). Command: `git push origin main`, after enabling Pages as docs/PUBLISHING.md says.
 
 Everything else still open is listed in AUDIT.md section 3a; none of it is a live-judgment gap.
 

@@ -929,11 +929,24 @@ implemented them. Change them here first, then in code.
   `@astrojs/starlight` 0.39.3, pinned exactly and locked (`site/package-lock.json`; CI uses `npm ci`). npm resolves Astro 7.4.12 / Starlight 0.43.1 today, which cannot run on
   the build machine: Astro 7 loads a native markdown module (`satteri`) that Windows Application Control blocks, with no configuration workaround; it is untested on Linux, so CI
   uses the lockfile's versions, which are the ones tested. Telemetry: Astro has no config switch; CI sets `ASTRO_TELEMETRY_DISABLED=1`.
-  NOT DONE / NOT PROVEN: the workflow has never run (this repository has no remote: precondition 3 of the brief, "a git repo with a remote", failed literally and was judged non-blocking,
+  NOT DONE / NOT PROVEN: THE WORKFLOW IS AN OPEN ROW. AUDIT.md 3a C66 and PROJECT_STATUS.md section 3 keep it open until a real run on main passes (a green run closes it; a failing
+  `configure-pages` step on the first run is the expected state until Pages is enabled, not a failure of the row; the closing edit is a person's, citing the run). The workflow has never run (this repository has no remote: precondition 3 of the brief, "a git repo with a remote", failed literally and was judged non-blocking,
   because every deliverable is local and the brief's own deploy rules describe a machine without one); the pinned action versions are unverified; Pages is not enabled; the site has never
   been published. SCOPE OF "NO NEW CLAIMS": the site adds only labels and the provenance footer; it publishes ONBOARDING.md, LIVE_RUN.md and CLAUDE.md as written, as the brief lists them, and
   those contain statements that are not in AUDIT.md or PROJECT_STATUS.md, so "nothing that is not in AUDIT.md or PROJECT_STATUS.md" holds for what the site AUTHORS, not for what those three
-  files say. Process: the project (A) and the guard (B) were written by two subagents against a contract and verified, calibrated and integrated here.
+  files say. 
+  CATEGORY BANNERS (added 2026-11-16): every page shows, above its content, one banner saying what KIND of statement it makes: CLAIMS for AUDIT.md and PROJECT_STATUS.md, PROCEDURES for docs/ONBOARDING.md
+  and docs/LIVE_RUN.md, DECISION LOG for CLAUDE.md, per `site/src/categories.json` (a source in no category or in two fails the build); the 404 page, which has no source file, shows "404 — not a page from the
+  repo; no claims here." The drift test pins the three texts itself (not read from the file the site renders from), and fails naming the page when a banner is missing, doubled, altered, or belongs to another
+  category (it names both), and checks that the 404 page holds only its banner and Starlight's own 404 copy. FINDING: the first real run failed with "404.html: expected exactly one banner, found 0":
+  Starlight builds the 404 page with its splash template, which never renders `PageTitle`, so the banner needed a `Hero` override (which refuses any other splash page). KNOWN INACCURACY, recorded not fixed
+  because the wording was specified: the CLAIMS banner says every statement on the page is backed by a test listed in AUDIT section 2, but both pages it labels also list claims that are NOT proven (AUDIT.md 3d).
+  SHA-PINNED ACTIONS: actions are SHA-pinned; a moving tag in docs.yml fails the publishing test. Each `uses:` is a full commit SHA with its version in a comment on the same line (checkout v4.4.0, configure-pages v5.0.0,
+  setup-node v4.4.0, setup-python v5.6.0, upload-pages-artifact v3.0.1, deploy-pages v4.0.5), resolved with `git ls-remote` on 2026-11-16; a tag, a branch, a short SHA, a missing or non-version comment, or an unpinned
+  extra action fails `tests/test_site_publishing.py`. That the SHAs still resolve and run is part of open row C66.
+  ENVIRONMENT: two dependencies are blocked by Windows Application Control on the development host (the anthropic SDK's jiter DLL, D16/D20; Astro 7's native markdown module, above); both were handled by dependency
+  choice, never by bypassing the policy (AUDIT.md 3d).
+  Process: the project (A) and the guard (B) were written by two subagents against a contract and verified, calibrated and integrated here.
 
 ## Architecture: genericity
 

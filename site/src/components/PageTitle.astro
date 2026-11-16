@@ -1,3 +1,28 @@
 ---
-// Intentionally empty: each source file already starts with its own H1.
+// Each source file already starts with its own H1, so the page title itself is not rendered here. What IS rendered, above the content,
+// is the page's CATEGORY BANNER: which kind of statement the page makes (claims, procedures or a decision log). The category comes
+// from src/categories.json, keyed by the source file; a page whose source is in no category (or in two) fails the build.
+import categories from '../categories.json';
+import banners from '../category-banners.json';
+import { sourcePath } from '../lib/source';
+
+const source = await sourcePath(Astro.locals.starlightRoute.entry);
+let category: string;
+let text: string;
+if (source === null) {
+	category = '404';
+	text = banners.not_found;
+} else {
+	const hits = Object.entries(categories as Record<string, string[]>)
+		.filter(([, files]) => files.includes(source))
+		.map(([name]) => name);
+	if (hits.length !== 1) {
+		throw new Error(`${source} must be listed in exactly one category of src/categories.json, found: ${hits.join(', ') || 'none'}`);
+	}
+	category = hits[0];
+	text = (banners as Record<string, string>)[category];
+	if (!text) throw new Error(`No banner text for category "${category}" in src/category-banners.json`);
+}
 ---
+
+<aside class="category-banner" role="note" data-category={category} data-source={source ?? ''}>{text}</aside>

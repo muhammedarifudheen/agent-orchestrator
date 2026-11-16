@@ -1,0 +1,15 @@
+---
+// Starlight renders its own 404 page with the splash/hero template, which never calls PageTitle. The 404 page has no source file, so it gets
+// the special 404 banner here. This component is used only by splash pages, and the only one this site has is the 404 page: any other
+// splash page would have no category, so the build refuses it rather than publish a page with no banner.
+import Default from '@astrojs/starlight/components/Hero.astro';
+import banners from '../category-banners.json';
+
+const id = Astro.locals.starlightRoute.entry.id;
+if (id !== '404') {
+	throw new Error(`Unexpected splash page "${id}": every page needs a category banner (src/categories.json), only the 404 page has none.`);
+}
+---
+
+<aside class="category-banner" role="note" data-category="404" data-source="">{banners.not_found}</aside>
+<Default {...Astro.props}><slot /></Default>
