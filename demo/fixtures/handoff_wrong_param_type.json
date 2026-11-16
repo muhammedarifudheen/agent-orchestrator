@@ -1,0 +1,32 @@
+{
+  "reason": "SYNTHETIC demo handoff: wrong argument type",
+  "goal": "SYNTHETIC demo handoff: wrong argument type",
+  "user": "demo",
+  "created_at": "2026-11-07T10:00:00+00:00",
+  "steps": [
+    {
+      "step": 1,
+      "tool": "weather__get_current_weather",
+      "ok": false,
+      "error_code": "INVALID_ARGUMENT"
+    },
+    {
+      "step": 2,
+      "tool": "weather__get_current_weather",
+      "ok": false,
+      "error_code": "INVALID_ARGUMENT"
+    }
+  ],
+  "error_snapshot": {
+    "step": 2,
+    "tool": "weather__get_current_weather",
+    "error_code": "INVALID_ARGUMENT",
+    "error_message": "latitude must be a number",
+    "retryable": false,
+    "recovery": "agent",
+    "arguments": {
+      "latitude": "12.97",
+      "longitude": 77.59
+    }
+  }
+}

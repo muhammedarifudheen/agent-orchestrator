@@ -1,0 +1,33 @@
+{
+  "reason": "SYNTHETIC demo handoff: system with no spec",
+  "goal": "SYNTHETIC demo handoff: system with no spec",
+  "user": "demo",
+  "created_at": "2026-11-07T10:00:00+00:00",
+  "steps": [
+    {
+      "step": 1,
+      "tool": "retail__charge_payment",
+      "ok": false,
+      "error_code": "CARD_DECLINED"
+    },
+    {
+      "step": 2,
+      "tool": "retail__charge_payment",
+      "ok": false,
+      "error_code": "CARD_DECLINED"
+    }
+  ],
+  "error_snapshot": {
+    "step": 2,
+    "tool": "retail__charge_payment",
+    "error_code": "CARD_DECLINED",
+    "error_message": "card declined",
+    "retryable": false,
+    "recovery": "human",
+    "arguments": {
+      "order_id": "ORD-DEMO0001",
+      "amount": "10.00"
+    },
+    "http_status": 402
+  }
+}

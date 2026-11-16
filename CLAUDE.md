@@ -870,6 +870,40 @@ implemented them. Change them here first, then in code.
   LIMITS: it checks that the page AGREES with AUDIT.md, not that AUDIT.md is right; the prose of (1) and the reasons in (3) are checked for presence, not truth;
   which 15 claims appear is a choice no test can judge; a newly proven claim does not have to appear.
 
+- D35. The offline demo (`demo/app.py`, a Gradio app for a Hugging Face Space) shows ONLY flows AUDIT.md section 2 marks as proven, and is offline by design.
+  THREE TABS, each on the real library and none on a model: (1) duty matching: `agent.duties.DutyLibrary` at its real threshold, applied the way the
+  orchestrator's `_try_duty` applies it (no match, ambiguous and below-threshold all go to a planner that the demo does not run); (2) write-safety refusal: the
+  real `WritePolicy` on the safety metadata the real servers publish, read in-process, and the real `agent.approvals.create` record; nothing is ever executed;
+  (3) learning-loop proposal: the real `learning/collect.py` and `learning/propose.py` on a SYNTHETIC handoff (three fixtures in `demo/fixtures/`: an undeclared
+  HTTP status gives `add_error_code`, a wrong parameter type gives `correct_param_type`, a system with no spec gives nothing, the D18 blind spot), in a temporary
+  directory; "times observed" N writes N copies of the one handoff, because propose needs a recurrence of two. Each tab names the section 2 claims it rests on
+  (C33/C34, C44/C12, C05); a banner above every tab (also in the page title) says the demo does not show C24, C25 or C27, which are open in 3a; a test checks the
+  cited claims are proven rows and those three are open rows. SAFETY: (a) it refuses to run if ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN or PROVIDER_API_KEY) is
+  set, with "This demo is offline-only by design; <VAR> must be unset.", in `build_app` and `main`, BEFORE gradio is imported; an empty value is not a key. (b)
+  Its only writes go to a scratch directory, refused if the temp location is itself under `specs/`, `servers/`, `handoffs/`, `learning/` or `proposals/`; a
+  pasted handoff whose tool or error code could escape a file name (`../`) is rejected. Hash tests over specs/, servers/, handoffs/, learning/, proposals/, duties/
+  and agent/ show no demo function changes a file (Python's own `__pycache__` is the one thing excluded). (c) No network: tests make `httpx`, `httpx2` and any
+  non-loopback socket connect or DNS lookup raise while every flow runs, and a fresh process shows running the flows loads neither the Anthropic SDK, gradio nor
+  `httpx`. FINDING: `mcp` 2.x depends on `httpx2` (a separate HTTP library, not `httpx`) and loads it when `write_safety` builds the in-memory `mcp.Client`; the
+  demo uses the in-memory transport only and builds no HTTP or SSE client, which the guards above enforce, but a guard on `httpx` alone would not have seen it.
+  The loopback exception exists because the Windows asyncio event loop connects to 127.0.0.1 for its own self-pipe.
+  GREP of demo/ for `httpx` (case-insensitive): ZERO matches, in code or prose. (A wider grep for `anthropic` and `api_key` finds three prose lines, the key-refusal
+  note in `demo/README.md` and the comment in `demo/requirements.txt` saying the SDK is absent; none is an import.) Indirect: `mcp` imports `httpx2` (above) and gradio
+  itself uses `httpx`; neither is imported BY the demo's own code.
+  TESTED HOW: `tests/test_demo_offline.py` (18 tests: the three flows against real fixtures, the real proposer shown by a spy and by applying its patch to the real spec, the banner, the
+  claims, and `build_app` wiring against a recording stand-in for gradio, so the project venv needs no gradio) and `tests/test_demo_safety.py` (19 tests). Mutation-checked: ten breaks of
+  app.py (no key refusal, none in build_app, a guard that does nothing, proposals written into the repo, a hand-written stub for propose.py, an Anthropic import, an
+  HTTP request, a banner without C27, a fourth tab) were each caught except one, an equivalent mutation (removing the check from `main` changes nothing because
+  `main` calls `build_app`, which refuses with the same message). REAL GRADIO, not a repo test: in a scratch virtualenv outside the repo the app was built and served
+  on loopback with gradio 6.32.0 and its three endpoints answered through `gradio_client` (duty `process_refund` exact 1.0, `book_flight` refused with
+  `WRITE_APPROVAL_REQUIRED`, an `add_error_code` patch for the synthetic failure); exactly three tabs. That version is pinned in `demo/requirements.txt` and in the
+  README's `sdk_version`; it is NOT in the project's requirements.txt.
+  NOT DONE, on purpose: no push or deploy of any kind (publishing is a human step, written out in `demo/README.md`); the review-gate refusal is a proven flow but
+  not one of the three tabs. NOT KNOWN: whether Hugging Face offers gradio 6.32.0 as an `sdk_version` today; the Space has never been built. The demo's page does not
+  contain AUDIT.md, so the README tells the publisher to link the source repository.
+  Process note: the work was split between two subagents (the app and its fixtures; the requirements, README and first test) against a written contract, and
+  integrated and verified here. The test author loosened the socket guard to allow loopback; that is kept, with the reason above.
+
 ## Architecture: genericity
 
 Goal: a pipeline that turns ANY reachable system into tools with the same contract, without a

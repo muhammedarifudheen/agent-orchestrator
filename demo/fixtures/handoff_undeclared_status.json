@@ -1,0 +1,33 @@
+{
+  "reason": "SYNTHETIC demo handoff: undeclared upstream status",
+  "goal": "SYNTHETIC demo handoff: undeclared upstream status",
+  "user": "demo",
+  "created_at": "2026-11-07T10:00:00+00:00",
+  "steps": [
+    {
+      "step": 1,
+      "tool": "weather__get_current_weather",
+      "ok": false,
+      "error_code": "UPSTREAM_TEAPOT"
+    },
+    {
+      "step": 2,
+      "tool": "weather__get_current_weather",
+      "ok": false,
+      "error_code": "UPSTREAM_TEAPOT"
+    }
+  ],
+  "error_snapshot": {
+    "step": 2,
+    "tool": "weather__get_current_weather",
+    "error_code": "UPSTREAM_TEAPOT",
+    "error_message": "upstream answered an undeclared status",
+    "retryable": false,
+    "recovery": "agent",
+    "arguments": {
+      "latitude": 12.97,
+      "longitude": 77.59
+    },
+    "http_status": 418
+  }
+}

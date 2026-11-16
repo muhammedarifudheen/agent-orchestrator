@@ -1,0 +1,9 @@
+# Runtime dependencies for the offline demo (demo/app.py), e.g. on a Hugging Face Space.
+# The Anthropic SDK is deliberately absent: the demo is offline by design, never calls a
+# model or any network, and refuses to start if a provider API key is set.
+# No test dependencies (pytest) here either.
+# Pinned to the version the app was smoke-tested with (real gradio, 2026-11-16: the three tabs served and answered over loopback).
+gradio==6.32.0
+mcp[cli]>=2.3,<3
+pyyaml>=6
+jsonschema>=4
