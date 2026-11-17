@@ -9,7 +9,7 @@ app_file: app.py
 pinned: false
 ---
 
-> This demo shows the flows AUDIT.md §2 marks as proven. It does not demo live-model planner judgment (C24), real doc extraction (C25), or real upstream apply (C27). Those are open in §3a.
+> This demo shows the flows AUDIT.md §2 marks as proven. It does not show live-model planner judgment (C24), real doc extraction (C25), or real upstream apply (C27) — all open in §3a.
 
 # Agent orchestrator: offline demo of proven flows
 
@@ -24,7 +24,7 @@ repository code and no model. Every claim it rests on is a row of AUDIT.md secti
 |---|---|---|---|
 | Duty matching | C33, C34 | The real duty matcher decides whether an intent fits a duty (exact first, then scored, against the recorded threshold; near-equal duties are ambiguous) and lists the steps and the write boundary. | Any planner or model run. An unmatched intent is only reported as going to the planner; the planner is not called (C24 is open). |
 | Write-safety refusal | C44, C12 | The real tool safety metadata and the real approval record: a write tool is refused without approval and a pending approval record is produced. | No tool is ever executed. Nothing is booked or transferred. |
-| Learning-loop proposal | C05 | The real proposer turns a sample failed-call handoff into a candidate spec patch (or none when the system has no spec, or the failure has not recurred). | Nothing is applied and no spec is written; a human must approve and apply. No real upstream failure is involved (C27 is open). |
+| Learning-loop proposal | C05 | The real proposer turns a sample failed-call handoff into a candidate spec patch (or none when the system has no spec, or the failure has not recurred), and for a failure the spec already declares a needs-review patch with its action file. | Nothing is applied and no spec is written; a human must approve and apply. No real upstream failure is involved (C27 is open). |
 
 ## What it does NOT do
 

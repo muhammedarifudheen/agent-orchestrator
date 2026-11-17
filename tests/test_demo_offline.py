@@ -23,8 +23,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 BANNER_TEXT = (
-    "This demo shows the flows AUDIT.md §2 marks as proven. It does not demo live-model planner "
-    "judgment (C24), real doc extraction (C25), or real upstream apply (C27). Those are open in §3a."
+    "This demo shows the flows AUDIT.md §2 marks as proven. It does not show live-model planner "
+    "judgment (C24), real doc extraction (C25), or real upstream apply (C27) — all open in §3a."
 )
 PROD_HOST = "api" + "." + "anthropic" + "." + "com"
 
@@ -177,7 +177,8 @@ def _check_applies(proposal):
 
 @pytest.mark.parametrize(
     "fixture,kind",
-    [("handoff_undeclared_status", "add_error_code"), ("handoff_wrong_param_type", "correct_param_type")],
+    [("handoff_undeclared_status", "add_error_code"), ("handoff_wrong_param_type", "correct_param_type"),
+     ("handoff_declared_code", "mark_needs_review")],
 )
 def test_learning_real_proposer(app, monkeypatch, fixture, kind):
     import learning.propose as lp
@@ -200,6 +201,17 @@ def test_learning_real_proposer(app, monkeypatch, fixture, kind):
     assert "human approval required" in r["note"]
     _check_applies(r["proposals"][0])
     assert seen, "spy never saw learning.propose.propose called"
+
+
+def test_a_code_the_spec_declares_gives_a_needs_review_patch_and_its_action_file(app):
+    fixture = app.load_fixture("handoff_declared_code")
+    r = app.learning_proposal(fixture)
+    assert r["ok"] is True and [p["kind"] for p in r["proposals"]] == ["mark_needs_review"]
+    [action] = r["actions"]
+    assert action["file"].endswith(".action.md") and "INVALID_COORDINATES" in action["content"]
+    summary, patch, shown = app._tab3(fixture)  # what the third tab displays: the patch AND the action file
+    assert patch.startswith("# proposal: mark_needs_review") and shown == action["content"]
+    assert r["applied"] is False and "human approval required" in r["note"]
 
 
 def test_learning_no_spec_system(app):
@@ -383,3 +395,22 @@ def test_demo_dir_is_offline():
         if p.suffix == ".py":
             src = p.read_text(encoding="utf-8")
             assert not re.search(r"^\s*(import|from)\s+(anthropic|httpx)\b", src, flags=re.M), p
+
+
+# the three directories the brief names must not change, before and after EACH demo function
+def _hashes(*names):
+    import hashlib
+
+    return {p.relative_to(ROOT).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+            for n in names for p in sorted((ROOT / n).rglob("*")) if p.is_file() and "__pycache__" not in p.parts}
+
+
+def test_specs_servers_and_handoffs_are_unchanged_before_and_after_each_demo_function(app):
+    calls = [("match_duty", lambda: app.match_duty("refund order ORD-ABCD1234")),
+             *[("write_safety " + t, (lambda t=t: app.write_safety(t))) for t in app.WRITE_TOOLS],
+             *[("learning_proposal " + n, (lambda n=n: app.learning_proposal(app.load_fixture(n)))) for n in app.fixture_names()]]
+    assert len(calls) == 1 + 3 + 4
+    for label, call in calls:
+        before = _hashes("specs", "servers", "handoffs")
+        call()
+        assert _hashes("specs", "servers", "handoffs") == before, f"{label} changed specs/, servers/ or handoffs/"

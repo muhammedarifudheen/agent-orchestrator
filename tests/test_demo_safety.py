@@ -2,7 +2,7 @@
 into the repo's specs/, servers/, handoffs/, learning/ or proposals/.
 
   * Key refusal: with ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN / PROVIDER_API_KEY) set, `assert_offline_only`, `build_app` and `main` refuse with
-    "This demo is offline-only by design; <VAR> must be unset.", BEFORE gradio is imported; `python demo/app.py` as a subprocess exits with that
+    "This demo is offline-only; <VAR> must be unset.", BEFORE gradio is imported; `python demo/app.py` as a subprocess exits with that
     message (gradio is not installed in this venv, so a missing refusal would surface as a different error).
   * Specs hash unchanged: each demo function is run and the files under specs/, servers/, handoffs/, learning/, proposals/, duties/ and agent/
     are hashed before and after (Python's own __pycache__ is not the demo's doing and is excluded).
@@ -24,7 +24,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 WATCHED = ("specs", "servers", "handoffs", "learning", "proposals", "duties", "agent")
 KEY_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "PROVIDER_API_KEY")
-MESSAGE = "This demo is offline-only by design; ANTHROPIC_API_KEY must be unset."
+MESSAGE = "This demo is offline-only; ANTHROPIC_API_KEY must be unset."
 
 
 @pytest.fixture(scope="module")
@@ -64,7 +64,7 @@ def test_the_mandated_sentence_is_exact_for_anthropic_api_key(app):
 def test_any_model_key_variable_refuses_and_names_itself(app, var):
     with pytest.raises(SystemExit) as exc:
         app.assert_offline_only({var: "x"})
-    assert str(exc.value) == f"This demo is offline-only by design; {var} must be unset."
+    assert str(exc.value) == f"This demo is offline-only; {var} must be unset."
 
 
 @pytest.mark.parametrize("env", [{}, {"ANTHROPIC_API_KEY": ""}, {"ANTHROPIC_API_KEY": "   "}, {"OTHER": "x"}])
@@ -98,7 +98,7 @@ def _flows(app):
     yield "match_duty (no match)", lambda: app.match_duty("what is the weather in Pune")
     for tool in ("search_flights", "book_flight", "transfer_funds"):
         yield f"write_safety {tool}", (lambda t=tool: app.write_safety(t))
-    for name in ("handoff_undeclared_status", "handoff_wrong_param_type", "handoff_no_spec_system"):
+    for name in ("handoff_undeclared_status", "handoff_wrong_param_type", "handoff_declared_code", "handoff_no_spec_system"):
         yield f"learning_proposal {name}", (lambda n=name: app.learning_proposal(app.load_fixture(n)))
     yield "learning_proposal (rejected input)", lambda: app.learning_proposal('{"error_snapshot": {"tool": "weather__x", "error_code": "../../evil"}}')
 
@@ -111,7 +111,7 @@ def test_no_demo_function_changes_a_file_under_the_repos_specs_servers_handoffs_
         after = tree()
         assert after == before, f"{label} changed the repo: {sorted(set(after.items()) ^ set(before.items()))[:4]}"
         names.append(label)
-    assert len(names) == 9, "every demo function, and the rejected input, was run"
+    assert len(names) == 10, "every demo function, and the rejected input, was run"
 
 
 def test_the_specs_directory_hash_is_unchanged_by_the_learning_tab_in_particular(app):

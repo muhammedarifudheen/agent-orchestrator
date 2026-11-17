@@ -874,12 +874,12 @@ implemented them. Change them here first, then in code.
   THREE TABS, each on the real library and none on a model: (1) duty matching: `agent.duties.DutyLibrary` at its real threshold, applied the way the
   orchestrator's `_try_duty` applies it (no match, ambiguous and below-threshold all go to a planner that the demo does not run); (2) write-safety refusal: the
   real `WritePolicy` on the safety metadata the real servers publish, read in-process, and the real `agent.approvals.create` record; nothing is ever executed;
-  (3) learning-loop proposal: the real `learning/collect.py` and `learning/propose.py` on a SYNTHETIC handoff (three fixtures in `demo/fixtures/`: an undeclared
-  HTTP status gives `add_error_code`, a wrong parameter type gives `correct_param_type`, a system with no spec gives nothing, the D18 blind spot), in a temporary
+  (3) learning-loop proposal: the real `learning/collect.py` and `learning/propose.py` on a SYNTHETIC handoff (four fixtures in `demo/fixtures/`: an undeclared
+  HTTP status gives `add_error_code`, a wrong parameter type gives `correct_param_type`, a code the spec already declares gives `mark_needs_review` and its `.action.md`, a system with no spec gives nothing, the D18 blind spot), in a temporary
   directory; "times observed" N writes N copies of the one handoff, because propose needs a recurrence of two. Each tab names the section 2 claims it rests on
   (C33/C34, C44/C12, C05); a banner above every tab (also in the page title) says the demo does not show C24, C25 or C27, which are open in 3a; a test checks the
   cited claims are proven rows and those three are open rows. SAFETY: (a) it refuses to run if ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN or PROVIDER_API_KEY) is
-  set, with "This demo is offline-only by design; <VAR> must be unset.", in `build_app` and `main`, BEFORE gradio is imported; an empty value is not a key. (b)
+  set, with "This demo is offline-only; <VAR> must be unset.", in `build_app` and `main`, BEFORE gradio is imported; an empty value is not a key. (b)
   Its only writes go to a scratch directory, refused if the temp location is itself under `specs/`, `servers/`, `handoffs/`, `learning/` or `proposals/`; a
   pasted handoff whose tool or error code could escape a file name (`../`) is rejected. Hash tests over specs/, servers/, handoffs/, learning/, proposals/, duties/
   and agent/ show no demo function changes a file (Python's own `__pycache__` is the one thing excluded). (c) No network: tests make `httpx`, `httpx2` and any
@@ -890,7 +890,7 @@ implemented them. Change them here first, then in code.
   GREP of demo/ for `httpx` (case-insensitive): ZERO matches, in code or prose. (A wider grep for `anthropic` and `api_key` finds three prose lines, the key-refusal
   note in `demo/README.md` and the comment in `demo/requirements.txt` saying the SDK is absent; none is an import.) Indirect: `mcp` imports `httpx2` (above) and gradio
   itself uses `httpx`; neither is imported BY the demo's own code.
-  TESTED HOW: `tests/test_demo_offline.py` (18 tests: the three flows against real fixtures, the real proposer shown by a spy and by applying its patch to the real spec, the banner, the
+  TESTED HOW: `tests/test_demo_offline.py` (21 tests: the three flows against real fixtures, the real proposer shown by a spy and by applying its patch to the real spec, the banner, the
   claims, and `build_app` wiring against a recording stand-in for gradio, so the project venv needs no gradio) and `tests/test_demo_safety.py` (19 tests). Mutation-checked: ten breaks of
   app.py (no key refusal, none in build_app, a guard that does nothing, proposals written into the repo, a hand-written stub for propose.py, an Anthropic import, an
   HTTP request, a banner without C27, a fourth tab) were each caught except one, an equivalent mutation (removing the check from `main` changes nothing because
@@ -901,6 +901,15 @@ implemented them. Change them here first, then in code.
   NOT DONE, on purpose: no push or deploy of any kind (publishing is a human step, written out in `demo/README.md`); the review-gate refusal is a proven flow but
   not one of the three tabs. NOT KNOWN: whether Hugging Face offers gradio 6.32.0 as an `sdk_version` today; the Space has never been built. The demo's page does not
   contain AUDIT.md, so the README tells the publisher to link the source repository.
+  REVISION 2026-11-17 (a revised brief for the same package; nothing was rebuilt, the app, its tests and the 2026-11-16 real-gradio smoke test stand): the banner now reads "This demo shows the flows AUDIT.md §2
+  marks as proven. It does not show live-model planner judgment (C24), real doc extraction (C25), or real upstream apply (C27) — all open in §3a." and the refusal sentence is "This demo is offline-only;
+  ANTHROPIC_API_KEY must be unset." (the later wording replaces the earlier "by design" one; the other two variables get the same sentence with their own name). A fourth fixture, `handoff_declared_code`, makes
+  the third tab show a `mark_needs_review` patch TOGETHER WITH its `.action.md`, which none of the first three reached (the revised brief says "spec patch diff + action.md"); it is now the tab's default
+  fixture (alphabetical). `tests/test_demo_offline.py` also holds the specs/servers/handoffs before-and-after hash check the revised brief names (the fuller sweep stays in `tests/test_demo_safety.py`).
+  Five further breaks of app.py were each caught (the action files dropped, a wrong action shown, proposals written into `handoffs/`, the old banner, the old refusal sentence). The real-gradio smoke test was
+  repeated after the change: banner in the title, three tabs answering, the new fixture showing its patch and action text, applied and specs_written both False. The revised brief's precondition "C59 is in
+  3a" is the id collision recorded for C66: C59 is a PROVEN claim (provider gating) and the open workflow row is C66. The revised brief also asked for two subagents; they were not spawned, because the app
+  and its tests already existed and the delta was a few lines in four files.
   Process note: the work was split between two subagents (the app and its fixtures; the requirements, README and first test) against a written contract, and
   integrated and verified here. The test author loosened the socket guard to allow loopback; that is kept, with the reason above.
 

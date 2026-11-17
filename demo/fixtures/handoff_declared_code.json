@@ -1,0 +1,33 @@
+{
+  "reason": "SYNTHETIC demo handoff: a code the spec already declares",
+  "goal": "SYNTHETIC demo handoff: a code the spec already declares",
+  "user": "demo",
+  "created_at": "2026-11-07T10:00:00+00:00",
+  "steps": [
+    {
+      "step": 1,
+      "tool": "weather__get_current_weather",
+      "ok": false,
+      "error_code": "INVALID_COORDINATES"
+    },
+    {
+      "step": 2,
+      "tool": "weather__get_current_weather",
+      "ok": false,
+      "error_code": "INVALID_COORDINATES"
+    }
+  ],
+  "error_snapshot": {
+    "step": 2,
+    "tool": "weather__get_current_weather",
+    "error_code": "INVALID_COORDINATES",
+    "error_message": "the service rejected the coordinates",
+    "retryable": false,
+    "recovery": "agent",
+    "arguments": {
+      "latitude": 999.0,
+      "longitude": 77.59
+    },
+    "http_status": 400
+  }
+}

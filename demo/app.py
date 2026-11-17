@@ -24,8 +24,8 @@ for _p in (str(ROOT / "servers"), str(ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-BANNER = ("This demo shows the flows AUDIT.md §2 marks as proven. It does not demo live-model planner judgment (C24), "
-          "real doc extraction (C25), or real upstream apply (C27). Those are open in §3a.")
+BANNER = ("This demo shows the flows AUDIT.md §2 marks as proven. It does not show live-model planner judgment (C24), "
+          "real doc extraction (C25), or real upstream apply (C27) — all open in §3a.")
 APP_TITLE = "Agent orchestrator: offline demo of proven flows. " + BANNER
 CLAIMS = {"duty": ["C33", "C34"], "write": ["C44", "C12"], "learning": ["C05"]}
 WRITE_TOOLS = ("search_flights", "book_flight", "transfer_funds")
@@ -55,7 +55,7 @@ def assert_offline_only(env=None) -> None:
     env = os.environ if env is None else env
     for name in _KEY_VARS:
         if (env.get(name) or "").strip():
-            raise SystemExit(f"This demo is offline-only by design; {name} must be unset.")
+            raise SystemExit(f"This demo is offline-only; {name} must be unset.")
 
 
 def _assert_not_protected(path) -> None:
