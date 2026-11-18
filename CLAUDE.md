@@ -957,6 +957,21 @@ implemented them. Change them here first, then in code.
   choice, never by bypassing the policy (AUDIT.md 3d).
   Process: the project (A) and the guard (B) were written by two subagents against a contract and verified, calibrated and integrated here.
 
+- D37. Audit ids are looked up, never guessed: a prompt that names an id has not seen the audit. The standing instruction is in this file under "Working with audit IDs": verify the id against the
+  current AUDIT.md; if it exists, use the next free id and record the substitution in the commit body and here; never reuse an id, never delete one. SUBSTITUTIONS SO FAR: (1) 2026-11-16, the docs-workflow
+  row: prompt said C59; C59 is taken (the provider-gating claim, proven in section 2); used C66. (2) 2026-11-17, the revised offline-demo brief: its precondition said C59 was open in 3a; C59 is proven and the
+  open row it meant is C66; no row was created. ENFORCED by `tests/test_audit_ids.py`, on the real AUDIT.md and its git history: an id is DEFINED by a table row; a row may not repeat within a table (sections 1, 2, 2b, 3a), an id
+  may not be defined as both proven (2 or 2b) and open (3a), nor in both 2 and 2b (the same claim appearing once in section 1 and once in section 2 is the audit's own layout, not a duplicate); every id the
+  audit mentions has a defining row; no id was ever removed and defined again over the whole history of AUDIT.md (reuse after deletion); and every id named in the last 20 commit messages is defined in AUDIT.md,
+  the failure naming the commit (the window is 20, as for the commit-label test D30). Shown on tmp copies of the real audit: a duplicated C58 row fails ("C58 is defined 2 times in AUDIT.md table 3a"); a new open
+  row that takes C59 fails ("C59 is defined as proven ... AND as open"); a commit naming an id the audit lacks fails naming the commit. Seven breaks of the checkers were each caught; the one that first survived
+  (checking only the latest commit) exposed a missing test, now added. NOT ENFORCED, on purpose: gaps (a person may remove a row) and the order in which ids are allocated. STATE WHEN ADDED (2026-11-17): C1 to C68,
+  no gap, no duplicate, no id mentioned without a definition, no id removed and re-added across the 19 commits that touched AUDIT.md, and no recent commit naming a missing id, so nothing was renumbered (that would
+  break every reference) and no allowlist exists. IDS ARE COMPARED BY NUMBER: the audit writes C01 to C09 zero-padded and a commit message or a prompt may write C1; the first version of the check compared strings,
+  called a C1 in its own commit message undefined, and would have passed a duplicate written C5 and C05; found when the test ran on the commit that added it, fixed, and pinned by a test (12 tests in all). NOT A SECTION 2 CLAIM: AUDIT.md section 2 may not cite a `tests/test_audit_*.py` test (D21, the recursion rule), so like the audit accuracy and
+  completeness tests this one is a check of the audit's own layout and has no claim row; a first attempt to add one (C69) failed `test_audit_proven_commands_match_the_named_tests_and_never_cite_audit_tests` and was removed. LIMITS: the commit check sees only text written as C followed by digits, and only the last 20 commits; a prompt that names a taken id and is then given a
+  different one is visible only through the substitution note it leaves; the test cannot tell a deliberate rewrite of a claim from a reuse unless the id was removed first.
+
 ## Architecture: genericity
 
 Goal: a pipeline that turns ANY reachable system into tools with the same contract, without a
@@ -1225,6 +1240,12 @@ trace templating is heuristic; every ingested spec still needs a person to read 
    servers is deprecated except when a spec cannot capture the system; document why in the file's
    module docstring.** Generated files carry a `GENERATED ... DO NOT EDIT` header: change the spec
    and regenerate. The shared contract test (`tests/test_contract.py`) must pass for every server.
+
+## Working with audit IDs
+
+When a prompt names an audit row ID (C<n>), verify it against the current AUDIT.md before using it. If the ID exists, use the next free ID and record the substitution in the commit body and in D-notes: 'prompt said C59; C59 is taken; used C66.' Never reuse an ID. Never delete an ID.
+
+`tests/test_audit_ids.py` (D37) fails on a duplicate definition, on an ID removed and defined again, and on a commit message that names an ID AUDIT.md does not define.
 
 ## Commands
 
