@@ -3,6 +3,7 @@
     POST /v1/duty-match   {intent}                -> which duty would run, its confidence, the write it stops before
     POST /v1/write-check  {tool, allow_writes}    -> is it a write, would the write policy allow it, why not
     POST /v1/propose      {handoff}               -> the proposal the real learning loop makes for a synthetic failure; never applied
+    GET  /healthz                                 -> {"status": "ok", "flows": [...the three...], "planner": false, "doc_extraction": false}
 
 No planner, no document extraction, no live upstream, no model: nothing here is credit-metered and nothing leaves the process. Every
 endpoint calls the demo's own functions (`match_duty`, `write_safety`, `learning_proposal`), loaded from demo/app.py: they are not
@@ -83,6 +84,16 @@ class ProposeOut(BaseModel):
     specs_written: bool
 
 
+FLOWS = ["duty-match", "write-check", "propose"]  # what /healthz says the service does: the three flows and nothing else
+
+
+class HealthOut(BaseModel):
+    status: str
+    flows: list[str]
+    planner: bool
+    doc_extraction: bool
+
+
 def create_app() -> FastAPI:
     assert_flows_only()  # first, before anything is built
     demo = _demo()
@@ -95,6 +106,12 @@ def create_app() -> FastAPI:
         if declared and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
             return JSONResponse({"detail": f"the request body is limited to {MAX_BODY_BYTES} bytes"}, status_code=413)
         return await call_next(request)
+
+    @app.get("/healthz", response_model=HealthOut)
+    def healthz() -> HealthOut:
+        """Liveness for the host's health check, and an honest statement of what is served: the three flows, and no planner and no document
+        extraction. It names no audit row and claims nothing else; it touches no file and calls no flow."""
+        return HealthOut(status="ok", flows=list(FLOWS), planner=False, doc_extraction=False)
 
     @app.post("/v1/duty-match", response_model=DutyMatchOut)
     def duty_match(body: DutyMatchIn) -> DutyMatchOut:

@@ -40,6 +40,7 @@ Each line is a claim from AUDIT.md section 2, verbatim, with its first cited tes
 - **C58** Free-provider limit, plan quality. Reason: `qwen3.5:4b` returned a parseable tool call that chose `travel__search_flights` for "book a seat"; free providers verify the wire format and the parser, not plan quality. Command: `python scripts/live_judgment.py --planner` with a larger `PROVIDER_MODEL`.
 - **C58** Free-provider limit, doc extraction within the client timeout. Reason: the request hit the client's 120 s `ReadTimeout` on this CPU. Command: `python scripts/live_judgment.py --doc`
 - **C26** Live behaviour of the five real-API servers. Reason: their live behaviour has no attested passing record; it is an opt-in step that needs no key but sends real requests to five third-party APIs. Command: `python scripts/live_judgment.py --live-apis --allow-live`
+- **C70** The minimal API's deployment (`Dockerfile`, `.github/workflows/api.yml`, Railway) has never run: no image was built, and no Railway project, token or public URL exists. Reason: it needs an account on a hosting service, which is the owner's to create (the trial needs no card; a paid plan does). Command: `git push origin main`, after the Railway steps in api/README.md.
 
 Everything else still open is listed in AUDIT.md section 3a; none of it is a live-judgment gap.
 

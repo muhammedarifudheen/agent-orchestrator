@@ -1040,6 +1040,22 @@ implemented them. Change them here first, then in code.
   three configurations); (2) no test had a near-miss request, so a service that named a below-threshold duty passed: added. NOT PROVEN: nothing is deployed and nothing was pushed; no load test; the real HTTP server was exercised by hand,
   not by a test.
 
+- D39. Deploying the minimal API (Dockerfile, `.github/workflows/api.yml`, target Railway). CHOICE AND WHY: of the three offered targets, only Railway fits and none was run. (C) Cloud Run with a minimum instance is OUT by the brief's own rule: Google states that
+  using its free tier needs a billing account and that the free trial needs a payment method, so it would need a credit card; the rule is to stop, not to enter one. (A) PythonAnywhere free is a poor fit: ASGI there is a beta granted on request through
+  support (the app would need `a2wsgi`, or a rewrite, to run on its WSGI hosting), the free web app shows a "1 month expiry" (not the 3 months the brief said), the quota is 512 MiB of disk and 100 CPU seconds, there is no Docker, and no documented
+  way to deploy from CI. (B) Railway runs the Dockerfile unchanged, has a documented CLI deploy for CI (`RAILWAY_TOKEN` project token, `railway up --ci --service`), and its trial needs NO credit card and does not sleep. THE CATCH, stated: the trial is
+  a one-time $5 grant that lasts 30 days, after which services STOP (and trial volumes are deleted) unless the owner upgrades to Hobby ($5 a month, which needs a card). So "always-on" holds for the trial only, and the choice to pay is the owner's.
+  WHAT WAS BUILT: `GET /healthz` returns exactly `{"status":"ok","flows":["duty-match","write-check","propose"],"planner":false,"doc_extraction":false}` and names no audit row (D38's "exactly three routes" is now three flow routes plus this one);
+  a `Dockerfile` (python:3.12-slim, `api/requirements.txt`, an explicit COPY list, a non-root user, `uvicorn api.app:app --host 0.0.0.0 --port ${PORT}`) and a `.dockerignore`; and `api.yml`: a test job (installs `api/requirements.txt` plus pytest,
+  pytest-asyncio and httpx; runs the API tests) on every push to main and every pull request, and a deploy job that `needs` it and runs only for a push to main, fails on its first step if `RAILWAY_TOKEN` is missing, pins the Railway CLI to 5.75.0 and
+  every action to a full commit SHA, and smoke-tests `/healthz` after the deploy when the repository variable `API_URL` is set. NO railway.json: Railway's own page says config-as-code is deprecated and stops working for existing files on 2026-12-01
+  (found by reading the reference before writing the file); the health-check path is set once in the dashboard and checked by the smoke test. NO model key anywhere: the image, the workflow, the host and the repository's secrets and variables carry none, and
+  `tests/test_api_deploy_files.py` fails on any (an `ANTHROPIC_*` or `PROVIDER_*` name, a secret, a variable). VERIFIED: the API and deploy-file tests (`tests/test_api_flows.py`, `tests/test_api_deploy_files.py`); the CI test job reproduced in a fresh virtualenv holding only `api/requirements.txt`, pytest,
+  pytest-asyncio and httpx (51 passed, with no anthropic or gradio installed); and the service run from a temporary directory holding ONLY the directories the Dockerfile copies (health check, the three flows over real HTTP, and the startup refusal),
+  which is what the image will contain. NOT VERIFIED: the Docker build itself (the Docker daemon was not running and Docker Desktop was not started on the owner's machine, which has been short of memory), any deploy, the Railway side, and the workflow on GitHub
+  (AUDIT.md 3a C70). The first deploy needs the owner's Railway account, a project token and three repository entries (the steps are in `api/README.md`); I did not and cannot create them. RISK: the service is unauthenticated and has no rate limiting,
+  and exposing it is the owner's decision; during the trial the $5 grant is the ceiling on what abuse can cost, and a paid plan needs a Railway usage limit first.
+
 ## Architecture: genericity
 
 Goal: a pipeline that turns ANY reachable system into tools with the same contract, without a

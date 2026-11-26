@@ -180,9 +180,35 @@ def test_bad_input_is_refused_and_nothing_executes(client):
     assert client.post("/v1/propose", content=b"x" * 70000, headers={"content-type": "application/json"}).status_code == 413
 
 
-def test_the_service_has_exactly_three_routes_all_post(api_module):
+def test_the_service_has_exactly_three_flow_routes_all_post_and_one_health_route(api_module):
     routes = {(r.path, tuple(sorted(r.methods))) for r in api_module.app.routes}
-    assert routes == {("/v1/duty-match", ("POST",)), ("/v1/write-check", ("POST",)), ("/v1/propose", ("POST",))}
+    assert routes == {("/v1/duty-match", ("POST",)), ("/v1/write-check", ("POST",)), ("/v1/propose", ("POST",)), ("/healthz", ("GET",))}
+
+
+def test_healthz_returns_200_and_exactly_the_three_flows(client):
+    r = client.get("/healthz")
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok", "flows": ["duty-match", "write-check", "propose"], "planner": False, "doc_extraction": False}
+
+
+def test_the_public_health_response_names_no_audit_row_and_claims_no_unproven_capability(client):
+    text = client.get("/healthz").text
+    assert not re.search(r"\bC\d+\b", text), "no audit row id of any kind"
+    for row in ("C24", "C25", "C27"):
+        assert row not in text
+    body = client.get("/healthz").json()
+    assert body["planner"] is False and body["doc_extraction"] is False, "the capabilities that are open in AUDIT.md 3a are stated as absent"
+    assert set(body) == {"status", "flows", "planner", "doc_extraction"}, "nothing else is said"
+    assert not any(word in text.lower() for word in ("claude", "anthropic", "model", "live", "real upstream")), text
+
+
+def test_the_health_check_calls_no_flow_and_needs_no_input(client, monkeypatch):
+    import sys
+    demo = sys.modules["api_demo_flows"]
+    for name in ("match_duty", "write_safety", "learning_proposal"):
+        monkeypatch.setattr(demo, name, lambda *a, **k: (_ for _ in ()).throw(AssertionError("healthz called a flow")))
+    assert client.get("/healthz").status_code == 200
+    assert client.post("/healthz").status_code == 405
 
 
 # -- (2) nothing is written to the repo ---------------------------------------------------------------------------------------------------------

@@ -1,0 +1,21 @@
+# Nothing here goes into the image: the Dockerfile copies an explicit list, and this keeps the build context small and free of local state.
+.git
+.github
+.venv
+.perf
+**/__pycache__
+**/*.pyc
+node_modules
+site
+tests
+docs
+handoffs
+inbox
+proposals
+runs
+scenarios
+offline_guard
+scripts
+ingest
+*.md
+!api/README.md
