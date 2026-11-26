@@ -1020,6 +1020,26 @@ implemented them. Change them here first, then in code.
   completeness tests this one is a check of the audit's own layout and has no claim row; a first attempt to add one (C69) failed `test_audit_proven_commands_match_the_named_tests_and_never_cite_audit_tests` and was removed. LIMITS: the commit check sees only text written as C followed by digits, and only the last 20 commits; a prompt that names a taken id and is then given a
   different one is visible only through the substitution note it leaves; the test cannot tell a deliberate rewrite of a claim from a reuse unless the id was removed first.
 
+- D38. A minimal API (`api/app.py`, FastAPI) serves ONLY the three AUDIT.md section 2 flows the offline demo proves; it is the "minimal safe version" of `docs/API_BACKEND_DECISION.md`. Three POST endpoints, each a thin wrapper over the demo's own
+  function, loaded by path from `demo/app.py` and NOT reimplemented: `/v1/duty-match {intent}` -> `{duty, confidence, write_boundary}`; `/v1/write-check {tool, allow_writes}` -> `{is_write, allowed, refusal_code,
+  pending_approval}`; `/v1/propose {handoff}` -> `{proposal_type, diff, action_md, applied, specs_written}`. SEMANTICS the shapes do not say: `duty` is the duty that WOULD run (the real matcher at its real threshold), else null, and a
+  near-miss (a candidate below the threshold) is null with that candidate's confidence; `write_boundary` is the TOOL of the write the duty stops before; `allowed` follows `allow_writes` through the real write policy and, when false, `refusal_code`
+  and the real pending-approval record say why; `/v1/propose` treats the handoff as observed twice (the recurrence the proposer needs, `learning.propose.MIN_RECURRENCE`), returns `proposal_type: "none"` when the proposer makes none, and never
+  applies anything (`applied` and `specs_written` are always false). No planner, no document extraction, no live upstream, no model, no credits; the service imports no Anthropic SDK and no HTTP client (tested in a fresh process and
+  statically). STARTUP REFUSAL: with ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN or PROVIDER_API_KEY set it exits with "this service serves AUDIT §2 flows only; <VAR> must be unset.", checked at import before anything else is built,
+  so `uvicorn api.app:app` refuses too (tested in-process, as `import api.app`, and under uvicorn). DESIGN CHOICES: the endpoints are plain `def` because `write_safety` runs an event loop of its own, which cannot nest inside an async
+  endpoint; the automatic /docs, /redoc and /openapi.json routes are off so there are exactly three routes; request bodies are capped at 64 KiB and the demo's own input caps and file-name guards apply (422 for bad input). NOT THERE, and
+  stated in `api/README.md`: no authentication and no rate limiting (the flows are deterministic and public by design; abuse can still cost CPU, so a rate-limiting proxy belongs in front of it before it is exposed). DEVIATIONS from the brief,
+  recorded: (a) the README line says C24, C25, C27 are not exposed, without C66: C66 closed on 2026-11-26 (AUDIT.md 2b), so the brief's line was stale, and a test checks that every row the line names is still open in 3a; (b) the
+  response fields `confidence` and `write_boundary` have the semantics above where the brief gave only types; (c) `fastapi` was added to the root `requirements.txt` as a test dependency (installed 0.165.0; a dry run showed nothing else
+  would change) and the service has its own `api/requirements.txt` without anthropic, httpx or gradio. TESTED (`tests/test_api_flows.py`, 27 tests): each endpoint's shape on the real fixtures; exactly three POST routes; no endpoint changes a file under
+  specs/, servers/, handoffs/, learning/, proposals/, duties/ or agent/; the refusal; no outbound network (the real network transports and any non-loopback socket raise while every endpoint runs, with a control proving the guard live); and
+  the README's three curl examples are EXTRACTED AND RUN, and run over real HTTP against a loopback uvicorn server once by hand (a loopback server is not outbound traffic; it was stopped afterwards). Eleven breaks of the service were each
+  caught. FINDINGS while building it: (1) the hash tests were blind to a service that writes the SAME file on every call, because each compared a call with the state just before it and an earlier test had already created the file: found by
+  a mutation that survived, and fixed by comparing with a snapshot taken at COLLECTION time plus a module-level guard, in this file AND in the two demo test files, where the same flaw would have hidden a constant leak (shown caught in
+  three configurations); (2) no test had a near-miss request, so a service that named a below-threshold duty passed: added. NOT PROVEN: nothing is deployed and nothing was pushed; no load test; the real HTTP server was exercised by hand,
+  not by a test.
+
 ## Architecture: genericity
 
 Goal: a pipeline that turns ANY reachable system into tools with the same contract, without a

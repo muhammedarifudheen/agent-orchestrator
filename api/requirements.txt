@@ -1,0 +1,7 @@
+# Runtime dependencies for the API (api/app.py): the framework, plus what the demo's three functions import.
+# Deliberately absent: anthropic (no model is ever called), gradio (the demo's UI, not its functions) and any HTTP client for outbound calls.
+fastapi>=0.165,<1
+uvicorn>=0.30
+mcp[cli]>=2.3,<3
+pyyaml>=6
+jsonschema>=4

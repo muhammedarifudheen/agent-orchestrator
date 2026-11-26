@@ -405,12 +405,14 @@ def _hashes(*names):
             for n in names for p in sorted((ROOT / n).rglob("*")) if p.is_file() and "__pycache__" not in p.parts}
 
 
+BASELINE_DIRS = _hashes("specs", "servers", "handoffs")  # at collection time, before any test has called a demo function (a repeated identical write would otherwise hide)
+
+
 def test_specs_servers_and_handoffs_are_unchanged_before_and_after_each_demo_function(app):
     calls = [("match_duty", lambda: app.match_duty("refund order ORD-ABCD1234")),
              *[("write_safety " + t, (lambda t=t: app.write_safety(t))) for t in app.WRITE_TOOLS],
              *[("learning_proposal " + n, (lambda n=n: app.learning_proposal(app.load_fixture(n)))) for n in app.fixture_names()]]
     assert len(calls) == 1 + 3 + 4
     for label, call in calls:
-        before = _hashes("specs", "servers", "handoffs")
         call()
-        assert _hashes("specs", "servers", "handoffs") == before, f"{label} changed specs/, servers/ or handoffs/"
+        assert _hashes("specs", "servers", "handoffs") == BASELINE_DIRS, f"{label} changed specs/, servers/ or handoffs/"

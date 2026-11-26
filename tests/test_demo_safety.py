@@ -52,6 +52,17 @@ def tree() -> dict[str, str]:
     return out
 
 
+# Taken at COLLECTION time, before any test has called a demo function: comparing each call with the state just before it would miss a function that
+# writes the same file every time (an earlier test, in this file or in test_demo_offline.py, would already have created it).
+BASELINE = tree()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def repo_untouched_by_the_whole_module():
+    yield
+    assert tree() == BASELINE, "a test in this module left a watched directory changed"
+
+
 # -- (a) key refusal -------------------------------------------------------------------------------------------------------------------
 
 def test_the_mandated_sentence_is_exact_for_anthropic_api_key(app):
@@ -106,16 +117,15 @@ def _flows(app):
 def test_no_demo_function_changes_a_file_under_the_repos_specs_servers_handoffs_learning_or_proposals(app):
     names = []
     for label, call in _flows(app):
-        before = tree()
         call()
         after = tree()
-        assert after == before, f"{label} changed the repo: {sorted(set(after.items()) ^ set(before.items()))[:4]}"
+        assert after == BASELINE, f"{label} changed the repo: {sorted(set(after.items()) ^ set(BASELINE.items()))[:4]}"
         names.append(label)
     assert len(names) == 10, "every demo function, and the rejected input, was run"
 
 
 def test_the_specs_directory_hash_is_unchanged_by_the_learning_tab_in_particular(app):
-    before = {k: v for k, v in tree().items() if k.startswith("specs/")}
+    before = {k: v for k, v in BASELINE.items() if k.startswith("specs/")}
     assert before, "there are specs to protect"
     for name in app.fixture_names():
         assert app.learning_proposal(app.load_fixture(name))["specs_written"] is False
