@@ -1,20 +1,20 @@
 # API backend decision: should the orchestrator be a public API?
 
-Written 2026-11-18 for a maintainer deciding. The live list of open rows is AUDIT.md §3a; this page names only the rows that bear on a public API, and `tests/test_api_decision_accuracy.py` fails if a row cited here has moved. Hosting figures were read from the providers' own pages on the date above and change: check them before relying on them.
+Written 2026-11-18 for a maintainer deciding; updated 2026-11-26, when C66 (proven) closed. The live list of open rows is AUDIT.md §3a; this page names only the rows that bear on a public API, and `tests/test_api_decision_accuracy.py` fails if a row cited here has moved. Hosting figures were read from the providers' own pages on the date above and change: check them before relying on them.
 
 ## 1. WHY NOT NOW
 
 - A public API would expose the planner (C24 (open)) and document extraction (C25 (open)). Both are open in §3a and both need Anthropic credits. The one live attempt so far stopped at its first step on a billing error, and the key it used was exposed in a chat transcript and revoked (AUDIT.md §3d).
 - Exposing a credit-metered path that has never passed once is the fastest way to burn credits on abuse and to publish claims the audit cannot back. Even a pass of the planner contract would show the right industries, each intent once and the right order, not that the right tool was chosen (AUDIT.md §3d).
 - The learning loop against a real upstream failure (C27 (open)) is unproven in the same way.
-- The docs workflow (C66 (open)) has never run: there is no remote and enabling Pages is a human step. A public API with an unverified deploy path has the same problem at a different layer.
+- The docs workflow (C66 (proven)) had never run until 2026-11-26, when its first real run built, tested and deployed the site (AUDIT.md §2b). That closes the objection for that workflow only: a public API's own deploy path, with its keys and limits, would still be unverified, at a different layer.
 
 ## 2. WHAT WOULD NEED TO BE TRUE FIRST
 
 - **Credits budgeted and rate-limited:** a hard cap of US$50 per month, set as the monthly spend limit in the Anthropic Console before any key is deployed (check that the Console offers it for the account), plus 20 planner calls per caller per day and 500 per month in total. The numbers are a bound chosen without cost data, because no live plan has been measured; replace them with figures derived from the first live run's token counts.
 - **A per-caller allowlist or API key, and a refusal path that does not leak the reason:** an unknown key, an exhausted limit and a disabled caller all return the same status, body and timing to an unauthenticated caller; the reason goes to the server log only.
 - **C24 (open), C25 (open) and C27 (open) closed at least once with live-run evidence,** their rows moved from §3a to §2b by the ceremony in AUDIT.md §5.
-- **C66 (open) closed** by a first real CI run, after a remote exists and Pages is enabled.
+- **A deploy path exercised once before exposure:** the docs workflow has this now (C66 (proven)); an API's own deploy has to be exercised the same way first.
 
 ## 3. IF YOU STILL WANT ONE
 
@@ -37,6 +37,6 @@ Three hosting options, as read on 2026-11-18. The Cloud Run free-tier quantities
 
 ## 5. WHAT TO SAY IN THE README
 
-The public API serves AUDIT §2 proven flows only; §3a gaps (C24, C25, C27, C66) are not exposed.
+The public API serves AUDIT §2 proven flows only; §3a gaps (C24, C25, C27) are not exposed.
 
-If one of those four rows closes, this sentence is edited in the same commit, and the accuracy test fails until it is.
+If one of those three rows closes, this sentence is edited in the same commit, and the accuracy test fails until it is.

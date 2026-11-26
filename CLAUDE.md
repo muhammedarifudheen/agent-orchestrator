@@ -4,6 +4,43 @@ Industry-agnostic orchestrator: a user states a goal in natural language, the Ag
 MCP tools to call, in what order, and how to fall back on errors. Supports travel, retail, banking, ...
 by adding MCP servers only — never by changing the Agent layer.
 
+## Quick start for new sessions
+
+Python 3.12, Windows/PowerShell primary. Start with `PROJECT_STATUS.md`, then `docs/ONBOARDING.md`.
+The numbered decisions (D1–D37) below are the detailed record; this section is only the orientation.
+
+**Setup / test** (always spell out the venv interpreter; bare `python` is the system one and lacks deps)
+- Install: `.venv\Scripts\python -m pip install -r requirements.txt` (create `.venv` only if missing)
+- All tests: `.venv\Scripts\python -m pytest -q` (0 failed is what matters; counts drift)
+- One test: `.venv\Scripts\python -m pytest tests/test_generator.py::test_committed_generated_files_are_up_to_date -q`
+- Flags: `--strict-budgets` / `STRICT_BUDGETS=1`, `--runslow` / `RUN_SLOW=1`, `LIVE_TESTS=1` (real APIs), `RUN_SITE=1` (site drift test)
+- Run ONE pytest process at a time; concurrent runs trip timing budgets. Re-run on a quiet host before calling a budget warning a regression.
+- No linter/formatter is configured. Checks are pytest, `python -m generators.from_spec specs/<name>.yaml --check`, and the site drift test.
+- PowerShell env vars: `$env:VAR="..."` (docs sometimes show cmd `set VAR=... &`).
+
+**Run**
+- `python demo.py --offline` (scripted LLM, no key); without `--offline` needs `ANTHROPIC_API_KEY` (model via `AGENT_MODEL`)
+- `python pipeline.py --once`: inbox → ingest → review gate → generate → verify
+- `python -m learning.collect | propose | apply`: failure-driven learning loop (human-gated)
+- `python demo/app.py`: offline Gradio demo (refuses to start if an API key env var is set)
+- Docs site: `cd site; npm ci; npm run build` (Astro, Node >=22.12)
+
+**Layout**
+- `agent/`: domain-free orchestrator, `tool_registry`, `duties`, `write_policy`, `registry_filter`, `provider_config`
+- `servers/`: one MCP server per system (`*_server.py`, auto-discovered). `travel`/`retail`/`banking` are hand-written mocks; `weather`, `jsonplaceholder`, `zippopotamus`, `catfact`, `dogceo` are GENERATED
+- `specs/` (+ `schema.json`) → `generators/from_spec.py` → `servers/<n>_server.py` + `tests/test_<n>.py`
+- `ingest/` (OpenAPI / HAR trace / doc → DRAFT spec), `inbox/`, `duties/` (reviewed tool sequences), `learning/`, `proposals/`, `handoffs/`, `offline_guard/`, `scenarios/`, `scripts/` (live-run ceremony, audit tools), `tests/`, `docs/`, `site/`, `demo/`
+- `site/` and `demo/` are not part of the agent; `site/node_modules` and `site/dist` are huge, skip them when searching
+
+**Gotchas**
+- Never hand-edit generated servers/tests (they carry a "DO NOT EDIT" header): change the spec and regenerate; `test_generator.py` fails on drift
+- This file, `PROJECT_STATUS.md` and `AUDIT.md` are test-guarded (`test_site_drift.py`, `test_project_status_accuracy.py`) and `site/` builds from them. Only claim something as proven if AUDIT.md §2 cites a test; look up audit IDs before using them (D37)
+- Tests and pipeline gates run offline (`offline_guard` raises `NetworkBlocked` for non-loopback); real network is opt-in only
+- Secrets only via env vars; never put an API key in chat or a repo file
+- C24 / C25 / C27 are unproven (need a real `ANTHROPIC_API_KEY` with credit, not available here). Ollama runs verify wiring only and never close an audit row
+- Never rewrite git history (it is the audit trail); `docs:`/`chore:` commits must not touch code paths (D30)
+- Don't lower `CONFIDENCE_THRESHOLD = 0.75` to pass a gate; change the constant and the line in this file together
+
 ## Architecture (three layers)
 
 ```
@@ -938,7 +975,7 @@ implemented them. Change them here first, then in code.
   `@astrojs/starlight` 0.39.3, pinned exactly and locked (`site/package-lock.json`; CI uses `npm ci`). npm resolves Astro 7.4.12 / Starlight 0.43.1 today, which cannot run on
   the build machine: Astro 7 loads a native markdown module (`satteri`) that Windows Application Control blocks, with no configuration workaround; it is untested on Linux, so CI
   uses the lockfile's versions, which are the ones tested. Telemetry: Astro has no config switch; CI sets `ASTRO_TELEMETRY_DISABLED=1`.
-  NOT DONE / NOT PROVEN: THE WORKFLOW IS AN OPEN ROW. AUDIT.md 3a C66 and PROJECT_STATUS.md section 3 keep it open until a real run on main passes (a green run closes it; a failing
+  NOT DONE / NOT PROVEN (as written before 2026-11-26; see FIRST REAL RUN below): THE WORKFLOW WAS AN OPEN ROW. AUDIT.md 3a C66 and PROJECT_STATUS.md section 3 keep it open until a real run on main passes (a green run closes it; a failing
   `configure-pages` step on the first run is the expected state until Pages is enabled, not a failure of the row; the closing edit is a person's, citing the run). The workflow has never run (this repository has no remote: precondition 3 of the brief, "a git repo with a remote", failed literally and was judged non-blocking,
   because every deliverable is local and the brief's own deploy rules describe a machine without one); the pinned action versions are unverified; Pages is not enabled; the site has never
   been published. SCOPE OF "NO NEW CLAIMS": the site adds only labels and the provenance footer; it publishes ONBOARDING.md, LIVE_RUN.md and CLAUDE.md as written, as the brief lists them, and
@@ -952,9 +989,20 @@ implemented them. Change them here first, then in code.
   because the wording was specified: the CLAIMS banner says every statement on the page is backed by a test listed in AUDIT section 2, but both pages it labels also list claims that are NOT proven (AUDIT.md 3d).
   SHA-PINNED ACTIONS: actions are SHA-pinned; a moving tag in docs.yml fails the publishing test. Each `uses:` is a full commit SHA with its version in a comment on the same line (checkout v4.4.0, configure-pages v5.0.0,
   setup-node v4.4.0, setup-python v5.6.0, upload-pages-artifact v3.0.1, deploy-pages v4.0.5), resolved with `git ls-remote` on 2026-11-16; a tag, a branch, a short SHA, a missing or non-version comment, or an unpinned
-  extra action fails `tests/test_site_publishing.py`. That the SHAs still resolve and run is part of open row C66.
+  extra action fails `tests/test_site_publishing.py`. That the SHAs resolve and run was shown by the first real run (2026-11-26, AUDIT.md 2b C66).
   ENVIRONMENT: two dependencies are blocked by Windows Application Control on the development host (the anthropic SDK's jiter DLL, D16/D20; Astro 7's native markdown module, above); both were handled by dependency
   choice, never by bypassing the policy (AUDIT.md 3d).
+  FIRST REAL RUN (2026-11-26; C66 CLOSED): the repository was created public as `agent-orchestrator` under the owner's account with `gh repo create agent-orchestrator --public --source=. --push` (no force), after the
+  owner chose the name, public visibility and to push the history as is (it carries two author identities, which become public; a private repository would need a paid plan for Pages). The gh token lacked the
+  `workflow` scope, without which GitHub rejects a push that creates `.github/workflows/docs.yml`; `gh auth refresh -s workflow` needed the owner's approval in the browser (the first code expired unapproved).
+  Pages was enabled explicitly: `gh api -X POST repos/<owner>/<repo>/pages -f build_type=workflow`, re-checked as `"build_type": "workflow"`. The push itself triggered run 45796309785, which FAILED at
+  configure-pages ("Get Pages site failed ... Pages enabled") and skipped the deploy, exactly the expected first-run state, and incidentally showed the SHA-pinned checkout and configure-pages actions resolving.
+  The dispatched run 45796354415 (workflow_dispatch, commit 5f26d6f) SUCCEEDED: every build step (checkout, configure-pages, setup-node, `npm ci`, the site build, setup-python, the test dependencies, the REQUIRED drift test
+  with RUN_SITE=1, the upload) and the deploy job. The five pages are served at https://muhammedarifudheen.github.io/agent-orchestrator/ with each page's `data-commit` equal to the run's head SHA and the right category banner. Record `fc9469203208` (full SHA-256 in
+  AUDIT.md 2b) was written to the git-ignored `.perf/live_judgment.jsonl` with the harness's own `append_record` (subcommand `docs_workflow`, provider n/a); C66 was moved from 3a to 2b BY HAND, because
+  `scripts/move_audit_row.py` handles only the judgment rows, and the text that depended on it (C65, C68, the section 6 list, PROJECT_STATUS.md, `docs/API_BACKEND_DECISION.md` and the constants of its accuracy
+  test) was updated in the same commit. What this does NOT show: that a later push redeploys cleanly (the next push to main will be the first push-triggered run with Pages enabled), or anything about the
+  Astro 7 / Linux question (CI used the lockfile's versions, which is what was tested).
   Process: the project (A) and the guard (B) were written by two subagents against a contract and verified, calibrated and integrated here.
 
 - D37. Audit ids are looked up, never guessed: a prompt that names an id has not seen the audit. The standing instruction is in this file under "Working with audit IDs": verify the id against the

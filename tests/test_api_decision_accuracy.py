@@ -4,7 +4,7 @@ Enforced, on the real document and the real AUDIT.md:
   * the page has exactly its five sections, in order;
   * every audit row it cites carries a status tag, `C24 (open)` or `C33 (proven)`, and exists in AUDIT.md; a row tagged open must still be in
     section 3a (it fails when a row moved to 2b and the page was not updated), a row tagged proven must be in section 2 (or 2b);
-  * the four rows that bear on a public API (C24, C25, C27, C66) are all cited as open: the page must say what is open NOW;
+  * the three rows that bear on a public API (C24, C25, C27) are all cited as open: the page must say what is open NOW (C66 was a fourth until it closed on 2026-11-26);
   * the README sentence of section 5 is present verbatim, and every row it names is still open in 3a;
   * no hosting option is named without the word "free" within 40 characters of it, in the same paragraph (its free-tier limit is stated
     where it is named).
@@ -23,9 +23,9 @@ ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "docs" / "API_BACKEND_DECISION.md"
 SECTIONS = ["## 1. WHY NOT NOW", "## 2. WHAT WOULD NEED TO BE TRUE FIRST", "## 3. IF YOU STILL WANT ONE", "## 4. THE MINIMAL SAFE VERSION",
             "## 5. WHAT TO SAY IN THE README"]
-README_SENTENCE = "The public API serves AUDIT §2 proven flows only; §3a gaps (C24, C25, C27, C66) are not exposed."
+README_SENTENCE = "The public API serves AUDIT §2 proven flows only; §3a gaps (C24, C25, C27) are not exposed."
 OPTIONS = ("Cloud Run", "Render", "Fly.io")
-BEARING = ("C24", "C25", "C27", "C66")  # the open rows a public API would expose or depend on
+BEARING = ("C24", "C25", "C27")  # the open rows a public API would expose or depend on
 CITE = re.compile(r"\b(C\d+)\b(?P<tag> \((?P<status>open|proven)\))?")
 
 
@@ -91,8 +91,8 @@ def test_the_decision_page_exists_and_agrees_with_the_current_audit():
 
 # -- the checker must be able to fail -------------------------------------------------------------------------------------------------------
 
-def audit_with(open_=("C24", "C25", "C27", "C66"), proven=("C33", "C34", "C44", "C12", "C5", "C64")):
-    return mini(s1=list(proven), s2=list(proven), s3a=list(open_))
+def audit_with(open_=("C24", "C25", "C27"), proven=("C33", "C34", "C44", "C12", "C5", "C64"), live=("C66",)):
+    return mini(s1=list(proven), s2=list(proven), s2b=list(live), s3a=list(open_))
 
 
 GOOD = audit_with()
@@ -103,7 +103,7 @@ def test_the_control_the_real_page_agrees_with_an_audit_shaped_like_today():
 
 
 @pytest.mark.parametrize("label,doc_edit,audit,needle", [
-    ("a row moved from 3a to 2b and the page was not updated", lambda d: d, audit_with(open_=("C24", "C25", "C27"), proven=("C33", "C34", "C44", "C12", "C5", "C64", "C66")),
+    ("a row moved from 3a to 2b and the page was not updated", lambda d: d, audit_with(open_=("C24", "C25"), live=("C66", "C27")),
      "cited as open but it is not in AUDIT.md section 3a"),
     ("a row cited as proven is still open", lambda d: d.replace("C33 (proven)", "C24 (proven)", 1), GOOD, "cited as proven but it is not in AUDIT.md section 2"),
     ("a row that does not exist", lambda d: d.replace("C34 (proven)", "C999 (open)", 1), GOOD, "C999 is cited but AUDIT.md does not define it"),
@@ -111,7 +111,7 @@ def test_the_control_the_real_page_agrees_with_an_audit_shaped_like_today():
     ("a hosting option without its free-tier limit", lambda d: d.replace("**Render** — free tier:", "**Render** — plan:", 1), GOOD, "Render is named without its free-tier limit"),
     ("an extra section", lambda d: d + "\n## 6. EXTRA\n", GOOD, "exactly these sections"),
     ("the README sentence is missing", lambda d: d.replace(README_SENTENCE, "An API."), GOOD, "README sentence verbatim"),
-    ("a bearing row is no longer cited", lambda d: d.replace("C66 (open)", "the docs workflow"), GOOD, "C66 bears on a public API"),
+    ("a bearing row is no longer cited", lambda d: d.replace("C25 (open)", "document extraction"), GOOD, "C25 bears on a public API"),
 ])
 def test_drift_between_the_page_and_the_audit_is_caught(label, doc_edit, audit, needle):
     doc = doc_edit(REAL_DOC)
@@ -122,9 +122,9 @@ def test_drift_between_the_page_and_the_audit_is_caught(label, doc_edit, audit, 
 
 
 def test_the_readme_sentence_fails_when_a_row_it_names_has_moved():
-    moved = audit_with(open_=("C24", "C25", "C27"), proven=("C33", "C34", "C44", "C12", "C5", "C64", "C66"))
+    moved = audit_with(open_=("C24", "C25"), live=("C66", "C27"))
     found = problems(REAL_DOC, moved)
-    assert any("README sentence names C66 as a 3a gap" in p for p in found), found
+    assert any("README sentence names C27 as a 3a gap" in p for p in found), found
 
 
 def test_the_forty_character_rule_is_about_distance_not_just_presence():
